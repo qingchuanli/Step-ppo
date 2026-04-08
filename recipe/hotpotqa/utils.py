@@ -40,7 +40,8 @@ class PassagePool:
 
 class WikiQdrantRetriever:
     """
-    Simple wrapper around a local Qdrant + BGE embedding model for HotpotQA wiki search.
+    Simple wrapper around a local/remote Qdrant + BGE embedding model
+    for HotpotQA wiki retrieval.
     """
 
     def __init__(
@@ -63,6 +64,13 @@ class WikiQdrantRetriever:
         self._model: Optional[FlagAutoModel] = None
         self._lock = threading.RLock()
 
+    def __enter__(self):
+        self._ensure_client_and_model()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+
     def _ensure_client_and_model(self) -> None:
         with self._lock:
             if self._client is None:
@@ -70,10 +78,30 @@ class WikiQdrantRetriever:
                     self._client = QdrantClient(url=self.qdrant_url)
                 else:
                     self._client = QdrantClient(path=str(self._db_path))
+
             if self._model is None:
                 self._model = FlagAutoModel.from_finetuned(self.embedding_model_name)
 
-    def search(self, query: str, top_k: int = 5, title_filter: Optional[str] = None) -> List[Passage]:
+    def close(self) -> None:
+        with self._lock:
+            if self._model is not None:
+                try:
+                    stop_fn = getattr(self._model, "stop_self_pool", None)
+                    if callable(stop_fn):
+                        stop_fn()
+                except Exception as e:
+                    print(f"[WikiQdrantRetriever.close] stop_self_pool failed: {e}")
+                finally:
+                    self._model = None
+
+            self._client = None
+
+    def search(
+        self,
+        query: str,
+        top_k: int = 5,
+        title_filter: Optional[str] = None,
+    ) -> List[Passage]:
         """
         Blocking search API. Caller should run this in a thread pool if used from async code.
         """
@@ -126,6 +154,7 @@ def format_history_actions(history_actions: list[tuple[str, str]]) -> str:
     """
     if not history_actions:
         return "None"
+
     lines: list[str] = []
     for action, payload in history_actions:
         if action == "search":
@@ -133,4 +162,3 @@ def format_history_actions(history_actions: list[tuple[str, str]]) -> str:
         else:
             lines.append(f"[{action}] {payload}")
     return "\n".join(lines)
-
