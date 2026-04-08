@@ -1,9 +1,14 @@
 set -x
 
+export SWANLAB_API_KEY=d4Ejv4vUuBe9Jy3NOZrhE
+export SWANLAB_MODE=cloud
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 export VLLM_USE_V1=1
 export HYDRA_FULL_ERROR=1
-export MLFLOW_TRACKING_URI=${MLFLOW_TRACKING_URI:-http://127.0.0.1:8080}
+export MLFLOW_TRACKING_URI=${MLFLOW_TRACKING_URI:-http://172.17.0.1:5000}
+
+PROJECT_NAME='step-ppo'
+EXP_NAME='token-level-adv-hotpotqa-4gpu'
 
 PROJECT_DIR="$(pwd)"
 # Qdrant URL matches test_search.py (recipe/hotpotqa/base_qdrant_server.yaml)
