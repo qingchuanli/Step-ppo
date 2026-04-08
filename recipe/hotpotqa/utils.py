@@ -46,6 +46,7 @@ class WikiQdrantRetriever:
     def __init__(
         self,
         db_path: Optional[str] = None,
+        qdrant_url: Optional[str] = None,
         collection_name: str = "hpqa_corpus",
         embedding_model_name: str = "BAAI/bge-large-en-v1.5",
     ) -> None:
@@ -54,6 +55,7 @@ class WikiQdrantRetriever:
         default_db_path = data_dir / "qdrant_db"
 
         self._db_path = Path(db_path) if db_path is not None else default_db_path
+        self.qdrant_url = qdrant_url
         self.collection_name = collection_name
         self.embedding_model_name = embedding_model_name
 
@@ -64,7 +66,10 @@ class WikiQdrantRetriever:
     def _ensure_client_and_model(self) -> None:
         with self._lock:
             if self._client is None:
-                self._client = QdrantClient(path=str(self._db_path))
+                if self.qdrant_url:
+                    self._client = QdrantClient(url=self.qdrant_url)
+                else:
+                    self._client = QdrantClient(path=str(self._db_path))
             if self._model is None:
                 self._model = FlagAutoModel.from_finetuned(self.embedding_model_name)
 
@@ -89,9 +94,9 @@ class WikiQdrantRetriever:
                 ]
             )
 
-        results = self._client.search(
+        results = self._client.query_points(
             collection_name=self.collection_name,
-            query_vector=query_vec,
+            query=query_vec,
             limit=top_k,
             query_filter=q_filter,
         )

@@ -54,10 +54,12 @@ class HotpotQAAgentFlow(AgentFlowBase):
 
         # Qdrant wiki retriever (local DB path is resolved inside the class by default).
         qdrant_path = kwargs.get("qdrant_path", None)
+        qdrant_url = kwargs.get("qdrant_url", None)
         collection_name = kwargs.get("collection_name", "hpqa_corpus")
         embedding_model_name = kwargs.get("embedding_model_name", "BAAI/bge-large-en-v1.5")
         self.retriever = WikiQdrantRetriever(
             db_path=qdrant_path,
+            qdrant_url=qdrant_url,
             collection_name=collection_name,
             embedding_model_name=embedding_model_name,
         )

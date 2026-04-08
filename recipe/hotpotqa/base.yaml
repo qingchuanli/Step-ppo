@@ -4,8 +4,10 @@
   max_parallel_calls: 4
 
   # Optional overrides for retriever; by default it will resolve to
-  # data/corpus/hotpotqa/qdrant_db and collection "hpqa_corpus".
-  qdrant_path: null
+  # local path data/corpus/hotpotqa/qdrant_db and collection "hpqa_corpus".
+  # If qdrant_url is set, it has higher priority than qdrant_path.
+  qdrant_url: null
+  qdrant_path: /root/data/qdrant_db
   collection_name: hpqa_corpus
   embedding_model_name: BAAI/bge-large-en-v1.5
 
