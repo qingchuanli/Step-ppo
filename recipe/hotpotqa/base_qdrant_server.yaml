@@ -1,0 +1,11 @@
+# HotpotQA agent with Qdrant HTTP (same defaults as test_search.py).
+# Override qdrant_url here if your Qdrant host differs.
+- name: hotpotqa_agent
+  _target_: recipe.hotpotqa.hotpotqa_agent_flow.HotpotQAAgentFlow
+  max_steps: 5
+  max_parallel_calls: 4
+
+  qdrant_url: http://172.17.0.1:6333
+  qdrant_path: null
+  collection_name: hpqa_corpus
+  embedding_model_name: BAAI/bge-large-en-v1.5

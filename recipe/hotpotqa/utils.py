@@ -71,16 +71,20 @@ class WikiQdrantRetriever:
     def __exit__(self, exc_type, exc, tb):
         self.close()
 
+    def _ensure_loaded(self) -> None:
+        """Caller must hold ``self._lock`` when embedding may run concurrently (e.g. thread pool)."""
+        if self._client is None:
+            if self.qdrant_url:
+                self._client = QdrantClient(url=self.qdrant_url)
+            else:
+                self._client = QdrantClient(path=str(self._db_path))
+
+        if self._model is None:
+            self._model = FlagAutoModel.from_finetuned(self.embedding_model_name)
+
     def _ensure_client_and_model(self) -> None:
         with self._lock:
-            if self._client is None:
-                if self.qdrant_url:
-                    self._client = QdrantClient(url=self.qdrant_url)
-                else:
-                    self._client = QdrantClient(path=str(self._db_path))
-
-            if self._model is None:
-                self._model = FlagAutoModel.from_finetuned(self.embedding_model_name)
+            self._ensure_loaded()
 
     def close(self) -> None:
         with self._lock:
@@ -105,47 +109,50 @@ class WikiQdrantRetriever:
         """
         Blocking search API. Caller should run this in a thread pool if used from async code.
         """
-        self._ensure_client_and_model()
-        assert self._client is not None
-        assert self._model is not None
+        # Serialize encode + Qdrant query: rollout may call multiple wiki_search in parallel via
+        # run_in_executor on the same retriever; FlagEmbedding is not safe for concurrent use.
+        with self._lock:
+            self._ensure_loaded()
+            assert self._client is not None
+            assert self._model is not None
 
-        query_vec = self._model.encode_queries([query])[0]
+            query_vec = self._model.encode_queries([query])[0]
 
-        q_filter = None
-        if title_filter is not None:
-            q_filter = Filter(
-                must=[
-                    FieldCondition(
-                        key="title",
-                        match=MatchValue(value=title_filter),
-                    )
-                ]
-            )
-
-        response = self._client.query_points(
-            collection_name=self.collection_name,
-            query=query_vec,
-            limit=top_k,
-            query_filter=q_filter,
-            with_payload=True,
-        )
-
-        hits = response.points
-
-        passages: List[Passage] = []
-        for hit in hits:
-            payload = hit.payload or {}
-            title = str(payload.get("title", ""))
-            text = str(payload.get("text", ""))
-            passages.append(
-                Passage(
-                    pid=int(hit.id),
-                    title=title,
-                    text=text,
-                    score=float(hit.score or 0.0),
+            q_filter = None
+            if title_filter is not None:
+                q_filter = Filter(
+                    must=[
+                        FieldCondition(
+                            key="title",
+                            match=MatchValue(value=title_filter),
+                        )
+                    ]
                 )
+
+            response = self._client.query_points(
+                collection_name=self.collection_name,
+                query=query_vec,
+                limit=top_k,
+                query_filter=q_filter,
+                with_payload=True,
             )
-        return passages
+
+            hits = response.points
+
+            passages: List[Passage] = []
+            for hit in hits:
+                payload = hit.payload or {}
+                title = str(payload.get("title", ""))
+                text = str(payload.get("text", ""))
+                passages.append(
+                    Passage(
+                        pid=int(hit.id),
+                        title=title,
+                        text=text,
+                        score=float(hit.score or 0.0),
+                    )
+                )
+            return passages
 
 
 def format_history_actions(history_actions: list[tuple[str, str]]) -> str:

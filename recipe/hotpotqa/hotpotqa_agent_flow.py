@@ -85,46 +85,102 @@ class HotpotQAAgentFlow(AgentFlowBase):
         self.passage_pool = PassagePool()
         self.history_actions = []
 
-        while num_steps < self.max_steps:
-            num_steps += 1
+        try:
+            while num_steps < self.max_steps:
+                num_steps += 1
 
-            messages = [
-                {"role": "system", "content": HOTPOTQA_SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": HOTPOTQA_USER_PROMPT.format(
-                        user_query=self.question,
-                        passage_list=self.passage_pool.passage_list,
-                        history_actions=format_history_actions(self.history_actions),
-                    ),
-                },
-            ]
+                messages = [
+                    {"role": "system", "content": HOTPOTQA_SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": HOTPOTQA_USER_PROMPT.format(
+                            user_query=self.question,
+                            passage_list=self.passage_pool.passage_list,
+                            history_actions=format_history_actions(self.history_actions),
+                        ),
+                    },
+                ]
 
-            prompt_ids = await self.apply_chat_template(
-                messages,
-                tools=self.tool_schemas,
-            )
-
-            with simple_timer("generate_sequences", metrics):
-                output = await self.server_manager.generate(
-                    request_id=uuid4().hex,
-                    prompt_ids=prompt_ids,
-                    sampling_params=sampling_params,
+                prompt_ids = await self.apply_chat_template(
+                    messages,
+                    tools=self.tool_schemas,
                 )
 
-            response_ids = output.token_ids[: self.response_length]
-            _, tool_calls = await self.tool_parser.extract_tool_calls(response_ids)
+                with simple_timer("generate_sequences", metrics):
+                    output = await self.server_manager.generate(
+                        request_id=uuid4().hex,
+                        prompt_ids=prompt_ids,
+                        sampling_params=sampling_params,
+                    )
 
-            # No tool calls: treat as final answer step.
-            if not tool_calls:
+                response_ids = output.token_ids[: self.response_length]
+                _, tool_calls = await self.tool_parser.extract_tool_calls(response_ids)
+
+                # No tool calls: treat as final answer step.
+                if not tool_calls:
+                    step = AgentFlowStep(
+                        prompt_ids=prompt_ids,
+                        response_ids=response_ids,
+                        response_logprobs=output.log_probs[: self.response_length] if output.log_probs else None,
+                        # IMPORTANT:
+                        # reward_score=None so ARFT RewardLoopWorker will call custom_reward_function
+                        # (exact match EM) based on decoded response + ground_truth from dataset.
+                        reward_score=None,
+                        extra_fields={
+                            "reward_extra_info": {
+                                "num_tool_steps": len(self.history_actions),
+                            },
+                        },
+                    )
+                    step = await self._postprocess(step, **kwargs)
+                    self.steps.append(step)
+                    break
+
+                # Tool calls exist: only support wiki_search, and do not assign reward here.
+                tool_calls = tool_calls[: self.max_parallel_calls]
+
+                tasks = []
+                queries: list[str] = []
+                for tool_call in tool_calls:
+                    try:
+                        tool_args = json.loads(tool_call.arguments)
+                    except Exception as e:
+                        logger.warning("Failed to parse tool arguments: %s", e)
+                        continue
+
+                    if tool_call.name == "wiki_search":
+                        query = tool_args.get("query")
+                        if not query:
+                            continue
+                        top_k = int(tool_args.get("top_k", 5))
+                        queries.append(query)
+                        # Run blocking retriever.search in thread pool.
+                        tasks.append(
+                            asyncio.get_running_loop().run_in_executor(
+                                None,
+                                self.retriever.search,
+                                query,
+                                top_k,
+                            )
+                        )
+
+                new_passages_list: list[list[Any]] = []
+                if tasks:
+                    with simple_timer("tool_calls", metrics):
+                        new_passages_list = await asyncio.gather(*tasks)
+
+                # Update passage pool & history
+                for query, passages in zip(queries, new_passages_list, strict=False):
+                    self.history_actions.append(("search", query))
+                    for p in passages:
+                        self.passage_pool.add_passage(p)
+
+                # Tool step: reward_score=0.0 (no shaping), but we still push step into trajectory.
                 step = AgentFlowStep(
                     prompt_ids=prompt_ids,
                     response_ids=response_ids,
                     response_logprobs=output.log_probs[: self.response_length] if output.log_probs else None,
-                    # IMPORTANT:
-                    # reward_score=None so ARFT RewardLoopWorker will call custom_reward_function
-                    # (exact match EM) based on decoded response + ground_truth from dataset.
-                    reward_score=None,
+                    reward_score=0.0,
                     extra_fields={
                         "reward_extra_info": {
                             "num_tool_steps": len(self.history_actions),
@@ -133,61 +189,9 @@ class HotpotQAAgentFlow(AgentFlowBase):
                 )
                 step = await self._postprocess(step, **kwargs)
                 self.steps.append(step)
-                break
-
-            # Tool calls exist: only support wiki_search, and do not assign reward here.
-            tool_calls = tool_calls[: self.max_parallel_calls]
-
-            tasks = []
-            queries: list[str] = []
-            for tool_call in tool_calls:
-                try:
-                    tool_args = json.loads(tool_call.arguments)
-                except Exception as e:
-                    logger.warning("Failed to parse tool arguments: %s", e)
-                    continue
-
-                if tool_call.name == "wiki_search":
-                    query = tool_args.get("query")
-                    if not query:
-                        continue
-                    top_k = int(tool_args.get("top_k", 5))
-                    queries.append(query)
-                    # Run blocking retriever.search in thread pool.
-                    tasks.append(
-                        asyncio.get_running_loop().run_in_executor(
-                            None,
-                            self.retriever.search,
-                            query,
-                            top_k,
-                        )
-                    )
-
-            new_passages_list: list[list[Any]] = []
-            if tasks:
-                with simple_timer("tool_calls", metrics):
-                    new_passages_list = await asyncio.gather(*tasks)
-
-            # Update passage pool & history
-            for query, passages in zip(queries, new_passages_list, strict=False):
-                self.history_actions.append(("search", query))
-                for p in passages:
-                    self.passage_pool.add_passage(p)
-
-            # Tool step: reward_score=0.0 (no shaping), but we still push step into trajectory.
-            step = AgentFlowStep(
-                prompt_ids=prompt_ids,
-                response_ids=response_ids,
-                response_logprobs=output.log_probs[: self.response_length] if output.log_probs else None,
-                reward_score=0.0,
-                extra_fields={
-                    "reward_extra_info": {
-                        "num_tool_steps": len(self.history_actions),
-                    },
-                },
-            )
-            step = await self._postprocess(step, **kwargs)
-            self.steps.append(step)
+        finally:
+            # Avoid FlagEmbedding multiprocess pool teardown during interpreter shutdown (__del__).
+            self.retriever.close()
 
         return AgentFlowOutput(steps=self.steps, metrics=metrics)
 
