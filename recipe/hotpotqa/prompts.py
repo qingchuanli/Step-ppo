@@ -17,7 +17,13 @@ HOTPOTQA_USER_PROMPT = """### Question
 ### Instructions
 - You can call the `wiki_search` tool with a natural language query to retrieve relevant passages.
 - You may call `wiki_search` multiple times to gather evidence.
-- After you are confident, you should STOP calling tools and directly output the final answer in the following format:
+- If more evidence is needed, output a tool call in the exact format below (Hermes parser):
+
+<tool_call>
+{"name":"wiki_search","arguments":{"query":"YOUR SEARCH QUERY","top_k":5}}
+</tool_call>
+
+- After you are confident, STOP calling tools and directly output the final answer in the following format:
 
 <answer>
 YOUR FINAL ANSWER HERE
@@ -57,4 +63,3 @@ WIKI_SEARCH_TOOL_SCHEMA = {
 
 
 HOTPOTQA_TOOL_SCHEMAS = [WIKI_SEARCH_TOOL_SCHEMA]
-

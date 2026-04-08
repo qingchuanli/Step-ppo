@@ -43,6 +43,8 @@ class HotpotQAAgentFlow(AgentFlowBase):
         super().__init__(trainer_config, server_manager, reward_loop_worker, tokenizer, processor, **kwargs)
         self.max_steps = kwargs.get("max_steps", 5)
         self.max_parallel_calls = kwargs.get("max_parallel_calls", 4)
+        # When enabled, force one bootstrap retrieval if first model turn produces no tool call.
+        self.force_first_search = bool(kwargs.get("force_first_search", True))
 
         self.tool_parser = ToolParser.get_tool_parser(
             self.config.actor_rollout_ref.rollout.multi_turn.format,
@@ -116,6 +118,35 @@ class HotpotQAAgentFlow(AgentFlowBase):
                 response_ids = output.token_ids[: self.response_length]
                 _, tool_calls = await self.tool_parser.extract_tool_calls(response_ids)
 
+                # No tool calls: bootstrap one retrieval on the first turn, then continue.
+                if not tool_calls and self.force_first_search and not self.history_actions:
+                    with simple_timer("tool_calls", metrics):
+                        passages = await asyncio.get_running_loop().run_in_executor(
+                            None,
+                            self.retriever.search,
+                            self.question,
+                            5,
+                        )
+                    self.history_actions.append(("search", self.question))
+                    for p in passages:
+                        self.passage_pool.add_passage(p)
+
+                    step = AgentFlowStep(
+                        prompt_ids=prompt_ids,
+                        response_ids=response_ids,
+                        response_logprobs=output.log_probs[: self.response_length] if output.log_probs else None,
+                        reward_score=0.0,
+                        extra_fields={
+                            "reward_extra_info": {
+                                "num_tool_steps": len(self.history_actions),
+                                "forced_first_search": 1,
+                            },
+                        },
+                    )
+                    step = await self._postprocess(step, **kwargs)
+                    self.steps.append(step)
+                    continue
+
                 # No tool calls: treat as final answer step.
                 if not tool_calls:
                     step = AgentFlowStep(
@@ -152,7 +183,7 @@ class HotpotQAAgentFlow(AgentFlowBase):
                         query = tool_args.get("query")
                         if not query:
                             continue
-                        top_k = int(tool_args.get("top_k", 5))
+                        top_k = max(1, min(20, int(tool_args.get("top_k", 5))))
                         queries.append(query)
                         # Run blocking retriever.search in thread pool.
                         tasks.append(
@@ -194,4 +225,3 @@ class HotpotQAAgentFlow(AgentFlowBase):
             self.retriever.close()
 
         return AgentFlowOutput(steps=self.steps, metrics=metrics)
-
