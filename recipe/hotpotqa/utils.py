@@ -94,19 +94,29 @@ class WikiQdrantRetriever:
                 ]
             )
 
-        results = self._client.query_points(
+        response = self._client.query_points(
             collection_name=self.collection_name,
             query=query_vec,
             limit=top_k,
             query_filter=q_filter,
+            with_payload=True,
         )
 
+        hits = response.points
+
         passages: List[Passage] = []
-        for hit in results:
+        for hit in hits:
             payload = hit.payload or {}
             title = str(payload.get("title", ""))
             text = str(payload.get("text", ""))
-            passages.append(Passage(pid=int(hit.id), title=title, text=text, score=float(hit.score or 0.0)))
+            passages.append(
+                Passage(
+                    pid=int(hit.id),
+                    title=title,
+                    text=text,
+                    score=float(hit.score or 0.0),
+                )
+            )
         return passages
 
 
