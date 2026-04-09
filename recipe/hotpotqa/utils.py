@@ -1,4 +1,5 @@
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
@@ -50,6 +51,9 @@ class WikiQdrantRetriever:
         qdrant_url: Optional[str] = None,
         collection_name: str = "hpqa_corpus",
         embedding_model_name: str = "BAAI/bge-large-en-v1.5",
+        request_timeout_s: float = 10.0,
+        max_retries: int = 3,
+        retry_backoff_s: float = 0.2,
     ) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         data_dir = repo_root / "data" / "corpus" / "hotpotqa"
@@ -59,6 +63,9 @@ class WikiQdrantRetriever:
         self.qdrant_url = qdrant_url
         self.collection_name = collection_name
         self.embedding_model_name = embedding_model_name
+        self.request_timeout_s = float(request_timeout_s)
+        self.max_retries = max(1, int(max_retries))
+        self.retry_backoff_s = max(0.0, float(retry_backoff_s))
 
         self._client: Optional[QdrantClient] = None
         self._model: Optional[FlagAutoModel] = None
@@ -75,9 +82,9 @@ class WikiQdrantRetriever:
         """Caller must hold ``self._lock`` when embedding may run concurrently (e.g. thread pool)."""
         if self._client is None:
             if self.qdrant_url:
-                self._client = QdrantClient(url=self.qdrant_url)
+                self._client = QdrantClient(url=self.qdrant_url, timeout=self.request_timeout_s)
             else:
-                self._client = QdrantClient(path=str(self._db_path))
+                self._client = QdrantClient(path=str(self._db_path), timeout=self.request_timeout_s)
 
         if self._model is None:
             self._model = FlagAutoModel.from_finetuned(self.embedding_model_name)
@@ -109,50 +116,56 @@ class WikiQdrantRetriever:
         """
         Blocking search API. Caller should run this in a thread pool if used from async code.
         """
-        # Serialize encode + Qdrant query: rollout may call multiple wiki_search in parallel via
-        # run_in_executor on the same retriever; FlagEmbedding is not safe for concurrent use.
-        with self._lock:
-            self._ensure_loaded()
-            assert self._client is not None
-            assert self._model is not None
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                # Serialize encode + Qdrant query: rollout may call multiple wiki_search in parallel via
+                # run_in_executor on the same retriever; FlagEmbedding is not safe for concurrent use.
+                with self._lock:
+                    self._ensure_loaded()
+                    assert self._client is not None
+                    assert self._model is not None
 
-            query_vec = self._model.encode_queries([query])[0]
+                    query_vec = self._model.encode_queries([query])[0]
 
-            q_filter = None
-            if title_filter is not None:
-                q_filter = Filter(
-                    must=[
-                        FieldCondition(
-                            key="title",
-                            match=MatchValue(value=title_filter),
+                    q_filter = None
+                    if title_filter is not None:
+                        q_filter = Filter(
+                            must=[
+                                FieldCondition(
+                                    key="title",
+                                    match=MatchValue(value=title_filter),
+                                )
+                            ]
                         )
-                    ]
-                )
 
-            response = self._client.query_points(
-                collection_name=self.collection_name,
-                query=query_vec,
-                limit=top_k,
-                query_filter=q_filter,
-                with_payload=True,
-            )
-
-            hits = response.points
-
-            passages: List[Passage] = []
-            for hit in hits:
-                payload = hit.payload or {}
-                title = str(payload.get("title", ""))
-                text = str(payload.get("text", ""))
-                passages.append(
-                    Passage(
-                        pid=int(hit.id),
-                        title=title,
-                        text=text,
-                        score=float(hit.score or 0.0),
+                    response = self._client.query_points(
+                        collection_name=self.collection_name,
+                        query=query_vec,
+                        limit=top_k,
+                        query_filter=q_filter,
+                        with_payload=True,
                     )
-                )
-            return passages
+
+                    hits = response.points
+
+                    passages: List[Passage] = []
+                    for hit in hits:
+                        payload = hit.payload or {}
+                        title = str(payload.get("title", ""))
+                        text = str(payload.get("text", ""))
+                        passages.append(
+                            Passage(
+                                pid=int(hit.id),
+                                title=title,
+                                text=text,
+                                score=float(hit.score or 0.0),
+                            )
+                        )
+                    return passages
+            except Exception:
+                if attempt >= self.max_retries:
+                    raise
+                time.sleep(self.retry_backoff_s * attempt)
 
 
 def format_history_actions(history_actions: list[tuple[str, str]]) -> str:

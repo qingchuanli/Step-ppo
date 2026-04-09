@@ -5,6 +5,10 @@
   max_steps: 5
   max_parallel_calls: 4
   force_first_search: true
+  max_concurrent_searches: 2
+  qdrant_request_timeout_s: 10.0
+  qdrant_max_retries: 3
+  qdrant_retry_backoff_s: 0.2
 
   qdrant_url: http://172.17.0.1:6333
   qdrant_path: null

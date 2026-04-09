@@ -61,6 +61,7 @@ class HotpotQAAgentFlow(AgentFlowBase):
         _ensure_file_logger()
         self.max_steps = kwargs.get("max_steps", 5)
         self.max_parallel_calls = kwargs.get("max_parallel_calls", 4)
+        self.max_concurrent_searches = int(kwargs.get("max_concurrent_searches", 2))
 
         self.tool_parser = ToolParser.get_tool_parser(
             self.config.actor_rollout_ref.rollout.multi_turn.format,
@@ -80,7 +81,11 @@ class HotpotQAAgentFlow(AgentFlowBase):
             qdrant_url=qdrant_url,
             collection_name=collection_name,
             embedding_model_name=embedding_model_name,
+            request_timeout_s=float(kwargs.get("qdrant_request_timeout_s", 10.0)),
+            max_retries=int(kwargs.get("qdrant_max_retries", 3)),
+            retry_backoff_s=float(kwargs.get("qdrant_retry_backoff_s", 0.2)),
         )
+        self.search_semaphore = asyncio.Semaphore(max(1, self.max_concurrent_searches))
 
         self.passage_pool = PassagePool()
         self.history_actions: list[tuple[str, str]] = []
@@ -187,20 +192,32 @@ class HotpotQAAgentFlow(AgentFlowBase):
                             continue
                         top_k = int(tool_args.get("top_k", 5))
                         queries.append(query)
-                        # Run blocking retriever.search in thread pool.
-                        tasks.append(
-                            asyncio.get_running_loop().run_in_executor(
-                                None,
-                                self.retriever.search,
-                                query,
-                                top_k,
-                            )
-                        )
+                        async def _safe_search(q: str, k: int):
+                            async with self.search_semaphore:
+                                return await asyncio.get_running_loop().run_in_executor(
+                                    None,
+                                    self.retriever.search,
+                                    q,
+                                    k,
+                                )
+
+                        tasks.append(_safe_search(query, top_k))
 
                 new_passages_list: list[list[Any]] = []
                 if tasks:
                     with simple_timer("tool_calls", metrics):
-                        new_passages_list = await asyncio.gather(*tasks)
+                        gathered = await asyncio.gather(*tasks, return_exceptions=True)
+                        for query, result in zip(queries, gathered, strict=False):
+                            if isinstance(result, Exception):
+                                logger.warning(
+                                    "[hotpotqa_agent][trajectory=%s] wiki_search failed for query=%s, err=%s",
+                                    trajectory_uid,
+                                    query,
+                                    result,
+                                )
+                                new_passages_list.append([])
+                            else:
+                                new_passages_list.append(result)
 
                 # Update passage pool & history
                 for query, passages in zip(queries, new_passages_list, strict=False):

@@ -20,7 +20,7 @@ HOTPOTQA_USER_PROMPT = """### Question
 - If more evidence is needed, output a tool call in the exact format below (Hermes parser):
 
 <tool_call>
-{"name":"wiki_search","arguments":{"query":"YOUR SEARCH QUERY","top_k":5}}
+{{"name":"wiki_search","arguments":{{"query":"YOUR SEARCH QUERY","top_k":5}}}}
 </tool_call>
 
 - After you are confident, STOP calling tools and directly output the final answer in the following format:
