@@ -62,6 +62,7 @@ class HotpotQAAgentFlow(AgentFlowBase):
         self.max_steps = kwargs.get("max_steps", 5)
         self.max_parallel_calls = kwargs.get("max_parallel_calls", 4)
         self.max_concurrent_searches = int(kwargs.get("max_concurrent_searches", 2))
+        self.require_http_qdrant = bool(kwargs.get("require_http_qdrant", True))
 
         self.tool_parser = ToolParser.get_tool_parser(
             self.config.actor_rollout_ref.rollout.multi_turn.format,
@@ -74,6 +75,17 @@ class HotpotQAAgentFlow(AgentFlowBase):
         # Qdrant wiki retriever (local DB path is resolved inside the class by default).
         qdrant_path = kwargs.get("qdrant_path", None)
         qdrant_url = kwargs.get("qdrant_url", None)
+        logger.warning(
+            "[hotpotqa_agent] init retriever with qdrant_url=%s, qdrant_path=%s",
+            qdrant_url,
+            qdrant_path,
+        )
+        if self.require_http_qdrant and not qdrant_url:
+            raise ValueError(
+                "HotpotQAAgentFlow requires HTTP Qdrant but qdrant_url is empty. "
+                "Please check actor_rollout_ref.rollout.agent.agent_flow_config_path "
+                "and recipe/hotpotqa/base_qdrant_server.yaml."
+            )
         collection_name = kwargs.get("collection_name", "hpqa_corpus")
         embedding_model_name = kwargs.get("embedding_model_name", "BAAI/bge-large-en-v1.5")
         self.retriever = WikiQdrantRetriever(

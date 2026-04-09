@@ -5,6 +5,7 @@
   max_steps: 5
   max_parallel_calls: 4
   force_first_search: true
+  require_http_qdrant: true
   max_concurrent_searches: 2
   qdrant_request_timeout_s: 10.0
   qdrant_max_retries: 3
