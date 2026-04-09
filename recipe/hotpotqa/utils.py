@@ -63,8 +63,7 @@ class HotpotQASearchToolLegacy:
         max_retries: int = 3,
         retry_backoff_s: float = 0.2,
     ) -> None:
-        repo_root = Path(__file__).resolve().parents[2]
-        default_data_dir = repo_root / "data" / "corpus" / "hotpotqa"
+        default_data_dir = Path("/root/data")
         self.data_dir = Path(data_dir) if data_dir else default_data_dir
         self.index_path = self.data_dir / "index.bin"
         self.corpus_path = self.data_dir / "hpqa_corpus.jsonl"

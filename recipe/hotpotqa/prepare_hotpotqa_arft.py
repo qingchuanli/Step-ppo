@@ -7,7 +7,9 @@
 #
 # Usage:
 #   pip install datasets pyarrow pandas
-#   python recipe/hotpotqa/prepare_hotpotqa_arft.py --output_dir data/corpus/hotpotqa
+#   python recipe/hotpotqa/prepare_hotpotqa_arft.py \
+#       --output_dir data/corpus/hotpotqa \
+#       --corpus_output_path /root/data/hpqa_corpus.jsonl
 
 from __future__ import annotations
 
@@ -133,6 +135,12 @@ def main() -> None:
         action="store_true",
         help="Do not write hpqa_corpus.jsonl.",
     )
+    parser.add_argument(
+        "--corpus_output_path",
+        type=str,
+        default="/root/data/hpqa_corpus.jsonl",
+        help="Output path for hpqa_corpus.jsonl used by search tool/index builder.",
+    )
     args = parser.parse_args()
 
     out_dir = os.path.abspath(os.path.expanduser(args.output_dir))
@@ -157,7 +165,8 @@ def main() -> None:
         print(f"Wrote {n} rows -> {path}")
 
     if not args.skip_corpus:
-        corpus_path = os.path.join(out_dir, "hpqa_corpus.jsonl")
+        corpus_path = os.path.abspath(os.path.expanduser(args.corpus_output_path))
+        os.makedirs(os.path.dirname(corpus_path), exist_ok=True)
         all_examples: list[dict[str, Any]] = []
         for split_name, max_n in (
             ("train", args.max_train),

@@ -10,7 +10,7 @@ import faiss
 from FlagEmbedding import FlagAutoModel
 import numpy as np
 
-_DEFAULT_DATA_DIR = Path("data/corpus/hotpotqa")
+_DEFAULT_DATA_DIR = Path("/root/data")
 
 
 def _load_corpus_texts(corpus_path: Path) -> list[str]:
@@ -27,7 +27,7 @@ def _load_corpus_texts(corpus_path: Path) -> list[str]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build HotpotQA FAISS index (legacy-compatible).")
     parser.add_argument("--data_dir", type=str, default=str(_DEFAULT_DATA_DIR))
-    parser.add_argument("--corpus_path", type=str, default=None)
+    parser.add_argument("--corpus_path", type=str, default="/root/data/hpqa_corpus.jsonl")
     parser.add_argument("--embedding_model", type=str, default="BAAI/bge-large-en-v1.5")
     parser.add_argument(
         "--query_instruction",
@@ -38,7 +38,7 @@ def main() -> None:
 
     data_dir = Path(args.data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
-    corpus_path = Path(args.corpus_path) if args.corpus_path else (data_dir / "hpqa_corpus.jsonl")
+    corpus_path = Path(args.corpus_path) if args.corpus_path else Path("/root/data/hpqa_corpus.jsonl")
     emb_path = data_dir / "hpqa_corpus.npy"
     index_path = data_dir / "index.bin"
 
