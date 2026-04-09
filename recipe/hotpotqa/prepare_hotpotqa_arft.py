@@ -3,7 +3,7 @@
 #
 # Download HotpotQA (distractor setting) and export:
 # 1) train.parquet / validation.parquet for verl/arft RLHFDataset (prompt + reward_model + data_source)
-# 2) hpqa_corpus.jsonl — deduplicated wiki paragraphs from all contexts (for Qdrant indexing, see process_hotpotqa.py)
+# 2) hpqa_corpus.jsonl — deduplicated wiki paragraphs from all contexts (for FAISS indexing, see process_hotpotqa.py)
 #
 # Usage:
 #   pip install datasets pyarrow pandas

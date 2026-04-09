@@ -2,13 +2,12 @@
   _target_: recipe.hotpotqa.hotpotqa_agent_flow.HotpotQAAgentFlow
   max_steps: 5
   max_parallel_calls: 4
+  force_first_search: true
+  max_concurrent_searches: 2
+  faiss_max_retries: 3
+  faiss_retry_backoff_s: 0.2
 
-  # Optional overrides for retriever; defaults are:
-  # data_dir=/root/data, index_path=/root/data/index.bin, corpus_path=/root/data/hpqa_corpus.jsonl
   data_dir: /root/data
   index_path: null
   corpus_path: null
   embedding_model_name: BAAI/bge-large-en-v1.5
-  faiss_max_retries: 3
-  faiss_retry_backoff_s: 0.2
-

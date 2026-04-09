@@ -12,7 +12,7 @@
 
 ```bash
 cd /Users/lqc/codes/PaperScout-main
-pip3 install -U datasets pyarrow pandas qdrant-client FlagEmbedding
+pip3 install -U datasets pyarrow pandas FlagEmbedding faiss-cpu
 ```
 
 ### 2. 准备 HotpotQA 数据（parquet + wiki 语料）
@@ -30,7 +30,7 @@ python3 recipe/hotpotqa/prepare_hotpotqa_arft.py \
 - `data/corpus/hotpotqa/validation.parquet`
 - `data/corpus/hotpotqa/hpqa_corpus.jsonl`
 
-### 3. 构建本地 Qdrant wiki 向量库
+### 3. 构建本地 FAISS wiki 向量库
 
 ```bash
 python3 recipe/hotpotqa/process_hotpotqa.py
@@ -38,9 +38,10 @@ python3 recipe/hotpotqa/process_hotpotqa.py
 
 这会在：
 
-- `data/corpus/hotpotqa/qdrant_db/`
+- `data/corpus/hotpotqa/index.bin`
+- `data/corpus/hotpotqa/hpqa_corpus.npy`（加 `--save_embeddings` 时）
 
-下建立 `hpqa_corpus` collection，供 `wiki_search` 工具使用。
+并供 `search` 工具本地检索使用。
 
 ### 4. 准备基础模型
 

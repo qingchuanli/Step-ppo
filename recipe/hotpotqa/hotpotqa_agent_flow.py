@@ -10,7 +10,7 @@ from transformers import AutoProcessor, AutoTokenizer
 from arft.agent_flow.agent_flow import AgentFlowBase, AgentFlowOutput, AgentFlowStep, register
 from arft.reward_loop import ARFTRewardLoopWorker as RewardLoopWorker
 from recipe.hotpotqa.prompts import HOTPOTQA_SYSTEM_PROMPT, HOTPOTQA_TOOL_SCHEMAS, HOTPOTQA_USER_PROMPT
-from recipe.hotpotqa.utils import PassagePool, WikiQdrantRetriever, format_history_actions
+from recipe.hotpotqa.utils import HotpotQASearchToolLegacy, PassagePool, format_history_actions, parse_legacy_tool_result
 from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager, DictConfigWrap
 from verl.experimental.agent_loop.tool_parser import ToolParser
 from verl.utils.profiler import simple_timer
@@ -41,7 +41,7 @@ class HotpotQAAgentFlow(AgentFlowBase):
     """
     Multi-step HotpotQA agent:
 
-    - Tools: wiki_search (local Qdrant)
+    - Tools: search (local FAISS CPU index)
     - Reward:
       * All tool steps: reward_score = 0.0 (no shaping)
       * Final step (no tool calls): reward_score = None,
@@ -59,10 +59,12 @@ class HotpotQAAgentFlow(AgentFlowBase):
     ):
         super().__init__(trainer_config, server_manager, reward_loop_worker, tokenizer, processor, **kwargs)
         _ensure_file_logger()
-        self.max_steps = kwargs.get("max_steps", 5)
-        self.max_parallel_calls = kwargs.get("max_parallel_calls", 4)
-        self.max_concurrent_searches = int(kwargs.get("max_concurrent_searches", 2))
-        self.require_http_qdrant = bool(kwargs.get("require_http_qdrant", True))
+        # Defaults should match recipe/hotpotqa/base_faiss_cpu.yaml
+        self.max_steps = int(kwargs.get("max_steps", 5))
+        self.max_parallel_calls = int(kwargs.get("max_parallel_calls", 4))
+        self.force_first_search = bool(kwargs.get("force_first_search", True))
+        self.faiss_max_retries = int(kwargs.get("faiss_max_retries", 3))
+        self.faiss_retry_backoff_s = float(kwargs.get("faiss_retry_backoff_s", 0.2))
 
         self.tool_parser = ToolParser.get_tool_parser(
             self.config.actor_rollout_ref.rollout.multi_turn.format,
@@ -72,32 +74,19 @@ class HotpotQAAgentFlow(AgentFlowBase):
         self.response_length = self.config.actor_rollout_ref.rollout.response_length
         self.tool_schemas = HOTPOTQA_TOOL_SCHEMAS
 
-        # Qdrant wiki retriever (local DB path is resolved inside the class by default).
-        qdrant_path = kwargs.get("qdrant_path", None)
-        qdrant_url = kwargs.get("qdrant_url", None)
+        # Legacy-compatible local FAISS search tool.
+        data_dir = kwargs.get("data_dir", None)
         logger.warning(
-            "[hotpotqa_agent] init retriever with qdrant_url=%s, qdrant_path=%s",
-            qdrant_url,
-            qdrant_path,
+            "[hotpotqa_agent] init retriever with data_dir=%s",
+            data_dir,
         )
-        if self.require_http_qdrant and not qdrant_url:
-            raise ValueError(
-                "HotpotQAAgentFlow requires HTTP Qdrant but qdrant_url is empty. "
-                "Please check actor_rollout_ref.rollout.agent.agent_flow_config_path "
-                "and recipe/hotpotqa/base_qdrant_server.yaml."
-            )
-        collection_name = kwargs.get("collection_name", "hpqa_corpus")
         embedding_model_name = kwargs.get("embedding_model_name", "BAAI/bge-large-en-v1.5")
-        self.retriever = WikiQdrantRetriever(
-            db_path=qdrant_path,
-            qdrant_url=qdrant_url,
-            collection_name=collection_name,
+        self.search_tool = HotpotQASearchToolLegacy(
+            data_dir=data_dir,
             embedding_model_name=embedding_model_name,
-            request_timeout_s=float(kwargs.get("qdrant_request_timeout_s", 10.0)),
-            max_retries=int(kwargs.get("qdrant_max_retries", 3)),
-            retry_backoff_s=float(kwargs.get("qdrant_retry_backoff_s", 0.2)),
+            max_retries=self.faiss_max_retries,
+            retry_backoff_s=self.faiss_retry_backoff_s,
         )
-        self.search_semaphore = asyncio.Semaphore(max(1, self.max_concurrent_searches))
 
         self.passage_pool = PassagePool()
         self.history_actions: list[tuple[str, str]] = []
@@ -186,10 +175,9 @@ class HotpotQAAgentFlow(AgentFlowBase):
                     self.steps.append(step)
                     break
 
-                # Tool calls exist: only support wiki_search, and do not assign reward here.
+                # Tool calls exist: only support search, and do not assign reward here.
                 tool_calls = tool_calls[: self.max_parallel_calls]
 
-                tasks = []
                 queries: list[str] = []
                 for tool_call in tool_calls:
                     try:
@@ -198,38 +186,35 @@ class HotpotQAAgentFlow(AgentFlowBase):
                         logger.warning("Failed to parse tool arguments: %s", e)
                         continue
 
-                    if tool_call.name == "wiki_search":
+                    if tool_call.name == "search":
                         query = tool_args.get("query")
                         if not query:
                             continue
-                        top_k = int(tool_args.get("top_k", 5))
                         queries.append(query)
-                        async def _safe_search(q: str, k: int):
-                            async with self.search_semaphore:
-                                return await asyncio.get_running_loop().run_in_executor(
-                                    None,
-                                    self.retriever.search,
-                                    q,
-                                    k,
-                                )
 
-                        tasks.append(_safe_search(query, top_k))
-
-                new_passages_list: list[list[Any]] = []
-                if tasks:
+                new_passages_list: list[list[Any]] = [[] for _ in queries]
+                if queries:
                     with simple_timer("tool_calls", metrics):
-                        gathered = await asyncio.gather(*tasks, return_exceptions=True)
-                        for query, result in zip(queries, gathered, strict=False):
-                            if isinstance(result, Exception):
-                                logger.warning(
-                                    "[hotpotqa_agent][trajectory=%s] wiki_search failed for query=%s, err=%s",
-                                    trajectory_uid,
-                                    query,
-                                    result,
-                                )
-                                new_passages_list.append([])
-                            else:
-                                new_passages_list.append(result)
+                        try:
+                            tool_results = await asyncio.get_running_loop().run_in_executor(
+                                None,
+                                self.search_tool.batch_execute,
+                                [{"query": q} for q in queries],
+                            )
+                            parsed_results: list[list[Any]] = []
+                            for item in tool_results:
+                                if not item.get("success", False):
+                                    parsed_results.append([])
+                                    continue
+                                parsed_results.append(parse_legacy_tool_result(str(item.get("content", ""))))
+                            new_passages_list = parsed_results
+                        except Exception as e:
+                            logger.warning(
+                                "[hotpotqa_agent][trajectory=%s] batch search failed, err=%s",
+                                trajectory_uid,
+                                e,
+                            )
+                            new_passages_list = [[] for _ in queries]
 
                 # Update passage pool & history
                 for query, passages in zip(queries, new_passages_list, strict=False):
@@ -252,7 +237,5 @@ class HotpotQAAgentFlow(AgentFlowBase):
                 step = await self._postprocess(step, **kwargs)
                 self.steps.append(step)
         finally:
-            # Avoid FlagEmbedding multiprocess pool teardown during interpreter shutdown (__del__).
-            self.retriever.close()
-
+            pass
         return AgentFlowOutput(steps=self.steps, metrics=metrics)

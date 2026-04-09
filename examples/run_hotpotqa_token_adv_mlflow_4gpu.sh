@@ -10,9 +10,11 @@ export MLFLOW_TRACKING_URI=${MLFLOW_TRACKING_URI:-http://172.17.0.1:5000}
 PROJECT_NAME='step-ppo'
 EXP_NAME='token-level-adv-hotpotqa-4gpu'
 
-PROJECT_DIR="$(pwd)"
-# Qdrant URL matches test_search.py (recipe/hotpotqa/base_qdrant_server.yaml)
-CONFIG_PATH="$PROJECT_DIR/recipe/hotpotqa/base_qdrant_server.yaml"
+# Resolve repo root from script location (robust to running from other dirs)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+# HotpotQA FAISS CPU search config
+CONFIG_PATH="$PROJECT_DIR/recipe/hotpotqa/base_faiss_cpu.yaml"
 
 HOTPOTQA_MODEL_PATH=${HOTPOTQA_MODEL_PATH:-Qwen/Qwen2.5-3B-Instruct}
 

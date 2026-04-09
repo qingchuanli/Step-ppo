@@ -1,12 +1,13 @@
-import threading
 import time
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
+import threading
 
+import faiss
 from FlagEmbedding import FlagAutoModel
-from qdrant_client import QdrantClient
-from qdrant_client.http.models import Filter, FieldCondition, MatchValue
+import numpy as np
 
 
 @dataclass
@@ -39,133 +40,152 @@ class PassagePool:
         return "\n".join(lines)
 
 
-class WikiQdrantRetriever:
+class HotpotQASearchToolLegacy:
     """
-    Simple wrapper around a local/remote Qdrant + BGE embedding model
-    for HotpotQA wiki retrieval.
+    Legacy-compatible FAISS search tool for HotpotQA.
+    Mirrors Agent-R1-legacy search_tool.py behavior:
+    - name: search
+    - input: {"query": "..."}
+    - output: {"content": "<json str>", "success": bool}
     """
+
+    _shared_lock = threading.RLock()
+    _shared_key: Optional[str] = None
+    _shared_index: Optional[faiss.Index] = None
+    _shared_corpus: Optional[list[str]] = None
+    _shared_model: Optional[FlagAutoModel] = None
 
     def __init__(
         self,
-        db_path: Optional[str] = None,
-        qdrant_url: Optional[str] = None,
-        collection_name: str = "hpqa_corpus",
+        data_dir: Optional[str] = None,
         embedding_model_name: str = "BAAI/bge-large-en-v1.5",
-        request_timeout_s: float = 10.0,
+        query_instruction: str = "Represent this sentence for searching relevant passages: ",
         max_retries: int = 3,
         retry_backoff_s: float = 0.2,
     ) -> None:
         repo_root = Path(__file__).resolve().parents[2]
-        data_dir = repo_root / "data" / "corpus" / "hotpotqa"
-        default_db_path = data_dir / "qdrant_db"
-
-        self._db_path = Path(db_path) if db_path is not None else default_db_path
-        self.qdrant_url = qdrant_url
-        self.collection_name = collection_name
+        default_data_dir = repo_root / "data" / "corpus" / "hotpotqa"
+        self.data_dir = Path(data_dir) if data_dir else default_data_dir
+        self.index_path = self.data_dir / "index.bin"
+        self.corpus_path = self.data_dir / "hpqa_corpus.jsonl"
         self.embedding_model_name = embedding_model_name
-        self.request_timeout_s = float(request_timeout_s)
+        self.query_instruction = query_instruction
         self.max_retries = max(1, int(max_retries))
         self.retry_backoff_s = max(0.0, float(retry_backoff_s))
 
-        self._client: Optional[QdrantClient] = None
+        self._index: Optional[faiss.Index] = None
+        self._corpus: list[str] = []
         self._model: Optional[FlagAutoModel] = None
-        self._lock = threading.RLock()
+        self._ensure_loaded()
 
     def __enter__(self):
-        self._ensure_client_and_model()
+        self._ensure_loaded()
         return self
 
     def __exit__(self, exc_type, exc, tb):
         self.close()
 
     def _ensure_loaded(self) -> None:
-        """Caller must hold ``self._lock`` when embedding may run concurrently (e.g. thread pool)."""
-        if self._client is None:
-            if self.qdrant_url:
-                self._client = QdrantClient(url=self.qdrant_url, timeout=self.request_timeout_s)
-            else:
-                self._client = QdrantClient(path=str(self._db_path), timeout=self.request_timeout_s)
+        cache_key = str(self.data_dir.resolve())
+        with self.__class__._shared_lock:
+            if (
+                self.__class__._shared_key != cache_key
+                or self.__class__._shared_index is None
+                or self.__class__._shared_corpus is None
+                or self.__class__._shared_model is None
+            ):
+                if not self.index_path.exists():
+                    raise FileNotFoundError(f"FAISS index not found: {self.index_path}")
+                if not self.corpus_path.exists():
+                    raise FileNotFoundError(f"Corpus file not found: {self.corpus_path}")
 
-        if self._model is None:
-            self._model = FlagAutoModel.from_finetuned(self.embedding_model_name)
+                index = faiss.read_index(str(self.index_path))
+                corpus: list[str] = []
+                with self.corpus_path.open("r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        rec = json.loads(line)
+                        title = str(rec.get("title", ""))
+                        text = str(rec.get("text", ""))
+                        corpus.append(f"{title} {text}".strip())
 
-    def _ensure_client_and_model(self) -> None:
-        with self._lock:
-            self._ensure_loaded()
+                model = FlagAutoModel.from_finetuned(
+                    self.embedding_model_name,
+                    query_instruction_for_retrieval=self.query_instruction,
+                    devices="cpu",
+                )
+                self.__class__._shared_key = cache_key
+                self.__class__._shared_index = index
+                self.__class__._shared_corpus = corpus
+                self.__class__._shared_model = model
+
+            self._index = self.__class__._shared_index
+            self._corpus = self.__class__._shared_corpus or []
+            self._model = self.__class__._shared_model
 
     def close(self) -> None:
-        with self._lock:
-            if self._model is not None:
-                try:
-                    stop_fn = getattr(self._model, "stop_self_pool", None)
-                    if callable(stop_fn):
-                        stop_fn()
-                except Exception as e:
-                    print(f"[WikiQdrantRetriever.close] stop_self_pool failed: {e}")
-                finally:
-                    self._model = None
+        # Keep shared model/index alive for whole training process.
+        # This matches legacy behavior where SearchTool is initialized once and reused.
+        self._index = self.__class__._shared_index
+        self._corpus = self.__class__._shared_corpus or []
+        self._model = self.__class__._shared_model
 
-            self._client = None
+    def execute(self, args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            query = str(args["query"])
+            embeddings = self._encode_queries([query])
+            assert self._index is not None
+            _, ids = self._index.search(embeddings, 5)
+            result_str = self._format_results(ids[0])
+            return {"content": result_str, "success": True}
+        except Exception as e:
+            return {"content": str(e), "success": False}
 
-    def search(
-        self,
-        query: str,
-        top_k: int = 5,
-        title_filter: Optional[str] = None,
-    ) -> List[Passage]:
-        """
-        Blocking search API. Caller should run this in a thread pool if used from async code.
-        """
+    def batch_execute(self, args_list: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not args_list:
+            return []
         for attempt in range(1, self.max_retries + 1):
             try:
-                # Serialize encode + Qdrant query: rollout may call multiple wiki_search in parallel via
-                # run_in_executor on the same retriever; FlagEmbedding is not safe for concurrent use.
-                with self._lock:
-                    self._ensure_loaded()
-                    assert self._client is not None
-                    assert self._model is not None
-
-                    query_vec = self._model.encode_queries([query])[0]
-
-                    q_filter = None
-                    if title_filter is not None:
-                        q_filter = Filter(
-                            must=[
-                                FieldCondition(
-                                    key="title",
-                                    match=MatchValue(value=title_filter),
-                                )
-                            ]
-                        )
-
-                    response = self._client.query_points(
-                        collection_name=self.collection_name,
-                        query=query_vec,
-                        limit=top_k,
-                        query_filter=q_filter,
-                        with_payload=True,
-                    )
-
-                    hits = response.points
-
-                    passages: List[Passage] = []
-                    for hit in hits:
-                        payload = hit.payload or {}
-                        title = str(payload.get("title", ""))
-                        text = str(payload.get("text", ""))
-                        passages.append(
-                            Passage(
-                                pid=int(hit.id),
-                                title=title,
-                                text=text,
-                                score=float(hit.score or 0.0),
-                            )
-                        )
-                    return passages
+                queries = [str(x["query"]) for x in args_list]
+                embeddings = self._encode_queries(queries)
+                assert self._index is not None
+                _, ids = self._index.search(embeddings, 5)
+                results_str = [self._format_results(ids[i]) for i in range(len(ids))]
+                return [{"content": s, "success": True} for s in results_str]
             except Exception:
                 if attempt >= self.max_retries:
-                    raise
+                    return [{"content": "batch search failed", "success": False} for _ in args_list]
                 time.sleep(self.retry_backoff_s * attempt)
+
+    def _encode_queries(self, queries: list[str]) -> np.ndarray:
+        self._ensure_loaded()
+        with self.__class__._shared_lock:
+            assert self._model is not None
+            return self._model.encode_queries(queries).astype(np.float32)
+
+    def _format_results(self, results: list[int]) -> str:
+        results_list: list[str] = []
+        for result in results:
+            if result < 0 or result >= len(self._corpus):
+                continue
+            results_list.append(self._corpus[result])
+        return json.dumps({"results": results_list}, ensure_ascii=False)
+
+
+def parse_legacy_tool_result(content: str) -> list[Passage]:
+    """Parse legacy `{"results":[...]}` tool content into Passage list."""
+    passages: list[Passage] = []
+    try:
+        payload = json.loads(content)
+        results = payload.get("results", [])
+        for idx, text in enumerate(results):
+            text_str = str(text)
+            passages.append(Passage(pid=idx, title="", text=text_str, score=0.0))
+    except Exception:
+        return []
+    return passages
 
 
 def format_history_actions(history_actions: list[tuple[str, str]]) -> str:
