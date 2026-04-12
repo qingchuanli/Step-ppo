@@ -284,18 +284,3 @@ def parse_legacy_tool_result(content: str) -> list[Passage]:
         return []
     return passages
 
-
-def format_history_actions(history_actions: list[tuple[str, str]]) -> str:
-    """
-    history_actions: list of (action_type, payload_str)
-    """
-    if not history_actions:
-        return "None"
-
-    lines: list[str] = []
-    for action, payload in history_actions:
-        if action == "search":
-            lines.append(f"[Search] {payload}")
-        else:
-            lines.append(f"[{action}] {payload}")
-    return "\n".join(lines)

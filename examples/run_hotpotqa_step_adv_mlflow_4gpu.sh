@@ -11,13 +11,7 @@ export VLLM_USE_V1=1
 export HYDRA_FULL_ERROR=1
 export MLFLOW_TRACKING_URI=${MLFLOW_TRACKING_URI:-http://172.17.0.1:5000}
 
-PROJECT_NAME='step-ppo'
-EXP_NAME='step-level-adv-hotpotqa-4gpu'
-
-# Resolve repo root from script location (robust to running from other dirs)
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="/root/workspace/Step-ppo"
-# HotpotQA FAISS CPU search config
 CONFIG_PATH="$PROJECT_DIR/recipe/hotpotqa/base_faiss_cpu.yaml"
 
 HOTPOTQA_MODEL_PATH=${HOTPOTQA_MODEL_PATH:-Qwen/Qwen2.5-3B-Instruct}
@@ -28,7 +22,6 @@ VAL_PATH="$PROJECT_DIR/data/corpus/hotpotqa/validation.parquet"
 PROJECT_NAME='HotpotQA_ARFT'
 EXP_NAME='hotpotqa_step_level_adv_mlflow_4gpu'
 
-# 磁盘：actor / critic 各自最多保留最近 3 次保存（verl 轮转逻辑见 RayPPOTrainer._save_checkpoint）
 python3 -m arft.main_agent_ppo \
     algorithm.adv_estimator=gae \
     data.train_files="$TRAIN_PATH" \
@@ -42,10 +35,13 @@ python3 -m arft.main_agent_ppo \
     actor_rollout_ref.model.path="$HOTPOTQA_MODEL_PATH" \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
+    actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=256 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean \
+    actor_rollout_ref.actor.fsdp_config.param_offload=True \
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=vllm \
@@ -56,9 +52,14 @@ python3 -m arft.main_agent_ppo \
     actor_rollout_ref.rollout.trace.backend=mlflow \
     actor_rollout_ref.rollout.trace.token2text=True \
     actor_rollout_ref.rollout.trace.max_samples_per_step_per_worker=5 \
+    actor_rollout_ref.ref.fsdp_config.param_offload=True \
     critic.model.path="$HOTPOTQA_MODEL_PATH" \
     critic.optim.lr=1e-5 \
+    critic.model.use_remove_padding=True \
+    critic.model.enable_gradient_checkpointing=True \
     critic.ppo_micro_batch_size_per_gpu=4 \
+    critic.model.fsdp_config.param_offload=True \
+    critic.model.fsdp_config.optimizer_offload=True \
     algorithm.use_kl_in_reward=False \
     reward_model.enable=False \
     custom_reward_function.path=recipe/hotpotqa/reward_fn.py \

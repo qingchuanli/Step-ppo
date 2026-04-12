@@ -36,8 +36,6 @@ from verl.utils.profiler import simple_timer
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
-LOG_DIR = "/root/data/log"
-LOG_PATH = f"{LOG_DIR}/hotpotqa_agent_flow.log"
 
 _RETRIEVAL_TOOL_NAMES = frozenset({"search", "wiki_search"})
 
@@ -53,19 +51,6 @@ def _decode_tool_arguments(arguments: str) -> dict[str, Any] | None:
         except Exception:
             return None
     return obj if isinstance(obj, dict) else None
-
-
-def _ensure_file_logger():
-    os.makedirs(LOG_DIR, exist_ok=True)
-    if any(
-        isinstance(handler, logging.FileHandler) and getattr(handler, "baseFilename", "") == LOG_PATH
-        for handler in logger.handlers
-    ):
-        return
-    file_handler = logging.FileHandler(LOG_PATH, encoding="utf-8")
-    file_handler.setLevel(logging.WARN)
-    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s - %(message)s"))
-    logger.addHandler(file_handler)
 
 
 def _format_passage_list(passages: list[tuple[str, str]], max_chars: int = 0) -> str:
@@ -113,12 +98,10 @@ class HotpotQAAgentFlow(AgentFlowBase):
         **kwargs,
     ):
         super().__init__(trainer_config, server_manager, reward_loop_worker, tokenizer, processor, **kwargs)
-        _ensure_file_logger()
 
         self.max_steps = int(kwargs.get("max_steps", 5))
         self.max_parallel_calls = int(kwargs.get("max_parallel_calls", 4))
         self.force_first_search = bool(kwargs.get("force_first_search", True))
-        self.max_tool_response_length = int(kwargs.get("max_tool_response_length", 2048))
 
         self.tool_parser = ToolParser.get_tool_parser(
             self.config.actor_rollout_ref.rollout.multi_turn.format,
@@ -149,10 +132,18 @@ class HotpotQAAgentFlow(AgentFlowBase):
             {"role": "user", "content": user_content},
         ]
 
+    def _make_extra_fields(self, history_actions: list[str], acc: float = 0.0) -> dict[str, Any]:
+        """Build extra_fields with consistent reward_extra_info keys across all steps."""
+        return {
+            "reward_extra_info": {
+                "num_tool_steps": len(history_actions),
+                "acc": acc,
+            },
+        }
+
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentFlowOutput:
         raw_prompt = list(kwargs["raw_prompt"])
         question = raw_prompt[0]["content"]
-        trajectory_uid = kwargs.get("uid", "unknown")
 
         metrics: dict[str, Any] = {}
         steps: list[AgentFlowStep] = []
@@ -172,8 +163,8 @@ class HotpotQAAgentFlow(AgentFlowBase):
             max_total = self.prompt_length + self.response_length
             if len(prompt_ids) >= max_total:
                 logger.warning(
-                    "[hotpotqa_agent][trajectory=%s][step=%d] prompt too long (%d tokens, budget %d); truncating.",
-                    trajectory_uid, num_steps, len(prompt_ids), max_total,
+                    "[hotpotqa_agent][step=%d] prompt too long (%d tokens, budget %d); truncating.",
+                    num_steps, len(prompt_ids), max_total,
                 )
                 prompt_ids = prompt_ids[-self.prompt_length:]
 
@@ -185,12 +176,6 @@ class HotpotQAAgentFlow(AgentFlowBase):
                 )
 
             response_ids = output.token_ids[: self.response_length]
-            response_text = self.tokenizer.decode(response_ids, skip_special_tokens=False)
-            logger.warning(
-                "[hotpotqa_agent][trajectory=%s][step=%d] OUTPUT_TEXT:\n%s",
-                trajectory_uid, num_steps, response_text,
-            )
-
             _, tool_calls = await self.tool_parser.extract_tool_calls(response_ids)
 
             if not tool_calls:
@@ -199,11 +184,10 @@ class HotpotQAAgentFlow(AgentFlowBase):
                     response_ids=response_ids,
                     response_logprobs=output.log_probs[: self.response_length] if output.log_probs else None,
                     reward_score=None,
-                    extra_fields={
-                        "reward_extra_info": {"num_tool_steps": len(history_actions)},
-                    },
+                    extra_fields=self._make_extra_fields(history_actions),
                 )
                 step = await self._postprocess(step, **kwargs)
+                step.extra_fields.setdefault("reward_extra_info", {})["num_tool_steps"] = len(history_actions)
                 steps.append(step)
                 break
 
@@ -229,9 +213,7 @@ class HotpotQAAgentFlow(AgentFlowBase):
                 response_ids=response_ids,
                 response_logprobs=output.log_probs[: self.response_length] if output.log_probs else None,
                 reward_score=0.0,
-                extra_fields={
-                    "reward_extra_info": {"num_tool_steps": len(history_actions)},
-                },
+                extra_fields=self._make_extra_fields(history_actions),
             )
             step = await self._postprocess(step, **kwargs)
             steps.append(step)
@@ -242,15 +224,7 @@ class HotpotQAAgentFlow(AgentFlowBase):
         """Execute a single search query and update state."""
         try:
             results = self.search_tool.batch_execute([{"query": query}])
-            for item in results:
-                if not item.get("success", False):
-                    continue
-                content = str(item.get("content", ""))
-                if len(content) > self.max_tool_response_length:
-                    content = content[:self.max_tool_response_length]
-                for p in parse_legacy_tool_result(content):
-                    if not any(existing_text == p.text for _, existing_text in passages):
-                        passages.append((query, p.text))
+            self._ingest_results(query, results, passages)
             history_actions.append(query)
         except Exception as e:
             logger.warning("[hotpotqa_agent] search failed for query=%r: %s", query, e)
@@ -261,17 +235,24 @@ class HotpotQAAgentFlow(AgentFlowBase):
         try:
             results = self.search_tool.batch_execute([{"query": q} for q in queries])
             for query, item in zip(queries, results):
-                if not item.get("success", False):
-                    history_actions.append(query)
-                    continue
-                content = str(item.get("content", ""))
-                if len(content) > self.max_tool_response_length:
-                    content = content[:self.max_tool_response_length]
-                for p in parse_legacy_tool_result(content):
-                    if not any(existing_text == p.text for _, existing_text in passages):
-                        passages.append((query, p.text))
+                self._ingest_results(query, [item], passages)
                 history_actions.append(query)
         except Exception as e:
             logger.warning("[hotpotqa_agent] batch search failed: %s", e)
             for q in queries:
                 history_actions.append(q)
+
+    @staticmethod
+    def _ingest_results(
+        query: str,
+        results: list[dict[str, Any]],
+        passages: list[tuple[str, str]],
+    ) -> None:
+        """Parse search results and deduplicate into the passage list."""
+        for item in results:
+            if not item.get("success", False):
+                continue
+            content = str(item.get("content", ""))
+            for p in parse_legacy_tool_result(content):
+                if not any(existing_text == p.text for _, existing_text in passages):
+                    passages.append((query, p.text))
