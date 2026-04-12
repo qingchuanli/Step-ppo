@@ -83,8 +83,6 @@ class HotpotQAAgentFlow(AgentFlowBase):
         self.max_steps = int(kwargs.get("max_steps", 5))
         self.max_parallel_calls = int(kwargs.get("max_parallel_calls", 4))
         self.force_first_search = bool(kwargs.get("force_first_search", True))
-        self.faiss_max_retries = int(kwargs.get("faiss_max_retries", 3))
-        self.faiss_retry_backoff_s = float(kwargs.get("faiss_retry_backoff_s", 0.2))
 
         self.tool_parser = ToolParser.get_tool_parser(
             self.config.actor_rollout_ref.rollout.multi_turn.format,
@@ -99,8 +97,6 @@ class HotpotQAAgentFlow(AgentFlowBase):
         embedding_devices = kwargs.get("embedding_devices", None)
         self.search_tool = HotpotQASearchToolLegacy(
             embedding_model_name=embedding_model_name,
-            max_retries=self.faiss_max_retries,
-            retry_backoff_s=self.faiss_retry_backoff_s,
             embedding_devices=embedding_devices,
         )
 
@@ -273,11 +269,8 @@ class HotpotQAAgentFlow(AgentFlowBase):
                 if queries:
                     with simple_timer("tool_calls", metrics):
                         try:
-                            tool_results = await asyncio.get_running_loop().run_in_executor(
-                                None,
-                                self.search_tool.batch_execute,
-                                [{"query": q} for q in queries],
-                            )
+                            # 不在默认 ThreadPoolExecutor 里跑：CUDA/BGE 在非主线程常失败且难排查
+                            tool_results = self.search_tool.batch_execute([{"query": q} for q in queries])
                             parsed_results: list[list[Any]] = []
                             for item in tool_results:
                                 if not item.get("success", False):
@@ -328,11 +321,7 @@ class HotpotQAAgentFlow(AgentFlowBase):
         if not (self.question or "").strip():
             return ""
         try:
-            tool_results = await asyncio.get_running_loop().run_in_executor(
-                None,
-                self.search_tool.batch_execute,
-                [{"query": self.question}],
-            )
+            tool_results = self.search_tool.batch_execute([{"query": self.question}])
             added = 0
             for item in tool_results:
                 if not item.get("success", False):

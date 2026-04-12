@@ -1,6 +1,5 @@
 import logging
 import os
-import time
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
@@ -8,6 +7,7 @@ from typing import Any, List, Optional
 import threading
 
 import faiss
+import torch
 from FlagEmbedding import FlagAutoModel
 import numpy as np
 
@@ -63,11 +63,17 @@ class PassagePool:
 
 class HotpotQASearchToolLegacy:
     """
-    Legacy-compatible FAISS search tool for HotpotQA.
-    Mirrors Agent-R1-legacy search_tool.py behavior:
-    - name: search
-    - input: {"query": "..."}
-    - output: {"content": "<json str>", "success": bool}
+    HotpotQA 本地 FAISS 检索，行为对齐大规模训练验证过的实现：
+    `Agent-R1-legacy/agent_r1/tool/tools/search_tool.py`（SearchTool）。
+
+    相对上游的增强（不改变成功路径语义）：
+    - 数据路径：`HOTPOTQA_DATA_ROOT` + `index.bin` / `hpqa_corpus.jsonl`
+    - 进程内共享 index/corpus/model，避免每轨迹重复加载
+    - `_format_results` 对非法 id 做边界检查（legacy 直接索引可能 IndexError）
+    - `encode_queries` 若为 torch.Tensor 则 `.cpu().numpy()`，便于非 CPU 设备与 FAISS CPU 索引衔接
+
+    上游验证配置：`FlagAutoModel.from_finetuned(..., devices="cpu")`；生产训练建议 CPU 编码，
+    若设 `HOTPOTQA_EMBEDDING_DEVICE=cuda:*` 需保证在同一线程调用（见 hotpotqa_agent_flow）。
     """
 
     _shared_lock = threading.RLock()
@@ -80,8 +86,6 @@ class HotpotQASearchToolLegacy:
         self,
         embedding_model_name: str = "BAAI/bge-large-en-v1.5",
         query_instruction: str = "Represent this sentence for searching relevant passages: ",
-        max_retries: int = 3,
-        retry_backoff_s: float = 0.2,
         embedding_devices: Optional[str] = None,
     ) -> None:
         self.data_dir = HOTPOTQA_DATA_ROOT
@@ -91,8 +95,6 @@ class HotpotQASearchToolLegacy:
         self.query_instruction = query_instruction
         dev = (embedding_devices if embedding_devices is not None else default_hotpotqa_embedding_device()).strip() or "cpu"
         self.embedding_devices = dev
-        self.max_retries = max(1, int(max_retries))
-        self.retry_backoff_s = max(0.0, float(retry_backoff_s))
 
         self._index: Optional[faiss.Index] = None
         self._corpus: list[str] = []
@@ -179,26 +181,37 @@ class HotpotQASearchToolLegacy:
             return {"content": str(e), "success": False}
 
     def batch_execute(self, args_list: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """与 Agent-R1-legacy `SearchTool.batch_execute` 相同：单次 encode + search，失败则每条返回同一 str(e)。"""
         if not args_list:
             return []
-        for attempt in range(1, self.max_retries + 1):
-            try:
-                queries = [str(x["query"]) for x in args_list]
-                embeddings = self._encode_queries(queries)
-                assert self._index is not None
-                _, ids = self._index.search(embeddings, 5)
-                results_str = [self._format_results(ids[i]) for i in range(len(ids))]
-                return [{"content": s, "success": True} for s in results_str]
-            except Exception:
-                if attempt >= self.max_retries:
-                    return [{"content": "batch search failed", "success": False} for _ in args_list]
-                time.sleep(self.retry_backoff_s * attempt)
+        try:
+            queries = [str(x["query"]) for x in args_list]
+            embeddings = self._encode_queries(queries)
+            assert self._index is not None
+            _, ids = self._index.search(embeddings, 5)
+            results_str = [self._format_results(ids[i]) for i in range(len(ids))]
+            return [{"content": result_str, "success": True} for result_str in results_str]
+        except Exception as e:
+            logger.warning(
+                "HotpotQASearchToolLegacy.batch_execute failed (%s queries): %s",
+                len(args_list),
+                e,
+                exc_info=True,
+            )
+            return [{"content": str(e), "success": False} for _ in args_list]
 
     def _encode_queries(self, queries: list[str]) -> np.ndarray:
         self._ensure_loaded()
         with self.__class__._shared_lock:
             assert self._model is not None
-            return self._model.encode_queries(queries).astype(np.float32)
+            out = self._model.encode_queries(queries)
+        # FAISS CPU Index::search 需要主存 float32 ndarray；BGE 在 GPU 上可能返回 torch.Tensor
+        if torch.is_tensor(out):
+            out = out.detach().float().cpu().numpy()
+        arr = np.asarray(out, dtype=np.float32)
+        if not arr.flags.c_contiguous:
+            arr = np.ascontiguousarray(arr)
+        return arr
 
     def _format_results(self, results) -> str:
         results_list: list[str] = []
