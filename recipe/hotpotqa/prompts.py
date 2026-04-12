@@ -11,7 +11,7 @@ Key rule (learned from Agent-R1-legacy):
     format in system area; user prompt contains ONLY the question and task instruction.
   - Paper_search: same pattern, user prompt mentions tool calls generically but
     Qwen3-4B handles the dual instructions fine; Qwen2.5-3B does NOT.
-  - Therefore: for Qwen2.5, user prompt must have ZERO <tool_call> tags.
+  - Therefore: for Qwen2.5, user prompt must have ZERO *example* <tool_call> blocks (only dynamic feedback below).
 """
 
 HOTPOTQA_SYSTEM_PROMPT = (
@@ -27,6 +27,9 @@ HOTPOTQA_USER_PROMPT = """### Question
 
 ### History Actions
 {history_actions}
+
+### Recent tool / format issues
+{tool_feedback}
 
 ### Instructions
 Analyze the retrieved passages and history actions, then decide your next step.

@@ -11,9 +11,11 @@ Architecture follows recipe/paper_search style:
 - Reward: tool steps get reward_score=0.0; final step gets reward_score=None (→ custom EM reward)
 """
 
+import ast
 import json
 import logging
 import os
+import re
 from typing import Any
 from uuid import uuid4
 
@@ -28,13 +30,75 @@ from recipe.hotpotqa.prompts import (
 )
 from recipe.hotpotqa.utils import HotpotQASearchToolLegacy, parse_legacy_tool_result
 from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager, DictConfigWrap
-from verl.experimental.agent_loop.tool_parser import ToolParser
+from verl.experimental.agent_loop.tool_parser import FunctionCall, ToolParser
 from verl.utils.profiler import simple_timer
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 _RETRIEVAL_TOOL_NAMES = frozenset({"search", "wiki_search"})
+_TOOL_CALL_BLOCK = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
+
+
+def _json_or_python_dict(s: str) -> Any:
+    """Parse JSON; on failure try Python literal dict (common small-model mistake)."""
+    s = s.strip()
+    if not s:
+        return None
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+    if len(s) > 8192 or "__" in s:
+        return None
+    try:
+        return ast.literal_eval(s)
+    except Exception:
+        return None
+
+
+def _normalize_tool_call_dict(obj: Any) -> dict[str, Any] | None:
+    """Return dict with str name and dict arguments, or None."""
+    if not isinstance(obj, dict) or "name" not in obj:
+        return None
+    name = obj["name"]
+    args = obj.get("arguments")
+    if args is None:
+        return None
+    if isinstance(args, str):
+        inner = _json_or_python_dict(args)
+        if not isinstance(inner, dict):
+            return None
+        args = inner
+    if not isinstance(args, dict):
+        return None
+    return {"name": str(name), "arguments": args}
+
+
+def _recover_tool_calls_from_text(text: str) -> list[FunctionCall]:
+    """
+    Fallback when Hermes json.loads fails (e.g. single-quoted dicts, trailing commas).
+    Agent-R1-legacy NousToolEnv still fails JSON but feeds 'Error: JSONDecodeError' into the next
+    user turn; here we try to salvage calls and additionally add text feedback (see run loop).
+    """
+    out: list[FunctionCall] = []
+    for raw in _TOOL_CALL_BLOCK.findall(text):
+        obj = _json_or_python_dict(raw.strip())
+        if obj is None:
+            continue
+        norm = _normalize_tool_call_dict(obj)
+        if norm is None:
+            continue
+        try:
+            out.append(
+                FunctionCall(
+                    name=norm["name"],
+                    arguments=json.dumps(norm["arguments"], ensure_ascii=False),
+                )
+            )
+        except Exception:
+            continue
+    return out
 
 
 def _decode_tool_arguments(arguments: str) -> dict[str, Any] | None:
@@ -114,14 +178,23 @@ class HotpotQAAgentFlow(AgentFlowBase):
             embedding_model_name=embedding_model_name,
             embedding_devices=embedding_devices,
         )
+        self.enable_tool_parse_feedback = bool(kwargs.get("enable_tool_parse_feedback", True))
 
-    def _build_messages(self, question: str, passages: list[tuple[str, str]], actions: list[str]) -> list[dict]:
+    def _build_messages(
+        self,
+        question: str,
+        passages: list[tuple[str, str]],
+        actions: list[str],
+        tool_feedback: str,
+    ) -> list[dict]:
         """Build [system, user] messages from current state, with passage truncation for safety."""
         max_passage_chars = self.prompt_length * 3
+        fb = tool_feedback.strip() if tool_feedback.strip() else "None"
         user_content = HOTPOTQA_USER_PROMPT.format(
             user_query=question,
             passage_list=_format_passage_list(passages, max_chars=max_passage_chars),
             history_actions=_format_history_actions(actions),
+            tool_feedback=fb,
         )
         return [
             {"role": "system", "content": HOTPOTQA_SYSTEM_PROMPT},
@@ -149,11 +222,16 @@ class HotpotQAAgentFlow(AgentFlowBase):
         if self.force_first_search:
             self._do_search(question, passages, history_actions)
 
+        tool_feedback_lines: list[str] = []
+
         num_steps = 0
         while num_steps < self.max_steps:
             num_steps += 1
 
-            messages = self._build_messages(question, passages, history_actions)
+            fb_text = "\n".join(tool_feedback_lines[-3:]) if tool_feedback_lines else ""
+            if not self.enable_tool_parse_feedback:
+                fb_text = ""
+            messages = self._build_messages(question, passages, history_actions, fb_text)
             prompt_ids = await self.apply_chat_template(messages, tools=self.tool_schemas)
 
             if len(prompt_ids) > self.prompt_length:
@@ -172,6 +250,22 @@ class HotpotQAAgentFlow(AgentFlowBase):
 
             response_ids = output.token_ids[: self.response_length]
             _, tool_calls = await self.tool_parser.extract_tool_calls(response_ids)
+            response_text = self.tokenizer.decode(response_ids, skip_special_tokens=True)
+
+            if not tool_calls:
+                recovered = _recover_tool_calls_from_text(response_text)
+                if recovered:
+                    tool_calls = recovered
+                elif (
+                    self.enable_tool_parse_feedback
+                    and "<tool_call>" in response_text
+                    and "</tool_call>" in response_text
+                ):
+                    tool_feedback_lines.append(
+                        "Previous assistant message contained <tool_call>...</tool_call> but the JSON "
+                        "could not be parsed. Use strict JSON with double-quoted keys and string values, "
+                        "comma between fields: name must be search and arguments must include query."
+                    )
 
             if not tool_calls:
                 step = AgentFlowStep(
@@ -206,6 +300,11 @@ class HotpotQAAgentFlow(AgentFlowBase):
             if queries:
                 with simple_timer("tool_calls", metrics):
                     self._do_search_batch(queries, passages, history_actions)
+            elif self.enable_tool_parse_feedback and tool_calls:
+                tool_feedback_lines.append(
+                    "Previous tool call was recognized but arguments were invalid. "
+                    "For search, arguments must be a JSON object with a string field query."
+                )
 
             step = AgentFlowStep(
                 prompt_ids=prompt_ids,

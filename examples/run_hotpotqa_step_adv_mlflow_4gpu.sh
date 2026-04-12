@@ -16,6 +16,13 @@ CONFIG_PATH="$PROJECT_DIR/recipe/hotpotqa/base_faiss_cpu.yaml"
 
 HOTPOTQA_MODEL_PATH=${HOTPOTQA_MODEL_PATH:-Qwen/Qwen2.5-3B-Instruct}
 
+# 长度预算（与 Agent-R1-legacy `run_ppo_hotpotqa.sh` 对照，语义不同）：
+# - Legacy：多轮 token 拼一条轨迹 → data.max_prompt_length=8192、整段 response=8192、单轮 max_response_length_single_turn=1024。
+# - 本脚本（ARFT AgentFlow）：每步重拼 prompt + 单步一次 generate；user 侧多了「Recent tool / format issues」段落，
+#   故适当加大 prompt；单步 response 对齐 legacy 的 1024，减少 <tool_call> JSON 被 max_tokens 截断。
+HOTPOTQA_MAX_PROMPT_LEN=${HOTPOTQA_MAX_PROMPT_LEN:-4096}
+HOTPOTQA_MAX_RESPONSE_LEN=${HOTPOTQA_MAX_RESPONSE_LEN:-1024}
+
 TRAIN_PATH="$PROJECT_DIR/data/corpus/hotpotqa/train.parquet"
 VAL_PATH="$PROJECT_DIR/data/corpus/hotpotqa/validation.parquet"
 
@@ -27,8 +34,8 @@ python3 -m arft.main_agent_ppo \
     data.train_files="$TRAIN_PATH" \
     data.val_files="$VAL_PATH" \
     data.train_batch_size=256 \
-    data.max_prompt_length=2048 \
-    data.max_response_length=512 \
+    data.max_prompt_length="$HOTPOTQA_MAX_PROMPT_LEN" \
+    data.max_response_length="$HOTPOTQA_MAX_RESPONSE_LEN" \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     data.return_raw_chat=True \

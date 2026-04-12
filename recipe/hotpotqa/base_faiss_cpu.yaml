@@ -7,3 +7,5 @@
   embedding_model_name: BAAI/bge-large-en-v1.5
   # null 则使用环境变量 HOTPOTQA_EMBEDDING_DEVICE（默认 cpu）；可写死如 "cuda:4"
   embedding_devices: null
+  # 与 Agent-R1-legacy 类似：解析/参数失败时在下一轮 user 中注入简短反馈，并尝试宽松 JSON 恢复
+  enable_tool_parse_feedback: true
