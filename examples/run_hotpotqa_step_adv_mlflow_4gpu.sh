@@ -2,8 +2,9 @@ set -x
 
 export SWANLAB_API_KEY=d4Ejv4vUuBe9Jy3NOZrhE
 export SWANLAB_MODE=cloud
-# 默认：物理 GPU 1–4 给 PPO/vLLM（trainer.n_gpus_per_node=4 → 进程内 cuda:0–3），物理 GPU 5 给 BGE 检索（cuda:4）。
-# 若只有 4 张卡，启动前请 export CUDA_VISIBLE_DEVICES=1,2,3,4 且 export HOTPOTQA_EMBEDDING_DEVICE=cpu
+# 物理 GPU 1–4 给 PPO/vLLM/Critic（trainer.n_gpus_per_node=4），物理 GPU 5 给 BGE 检索。
+# AgentFlowWorker 已通过 RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES 继承完整可见设备列表，
+# 因此 HOTPOTQA_EMBEDDING_DEVICE=cuda:4 对应列表中第 5 张（物理 GPU 5）。
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1,2,3,4,5}
 export HOTPOTQA_EMBEDDING_DEVICE=${HOTPOTQA_EMBEDDING_DEVICE:-cuda:4}
 export VLLM_USE_V1=1

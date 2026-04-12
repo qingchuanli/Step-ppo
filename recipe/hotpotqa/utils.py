@@ -22,8 +22,43 @@ logger = logging.getLogger(__name__)
 
 
 def default_hotpotqa_embedding_device() -> str:
-    """BGE query 编码设备；为当前进程可见 GPU 的 PyTorch 逻辑序号（如 cuda:4），不是 nvidia-smi 物理编号。"""
+    """从环境变量读取期望设备字符串（可能为 cuda:N），实际可用性见 `normalize_embedding_device`。"""
     return os.environ.get("HOTPOTQA_EMBEDDING_DEVICE", "cpu").strip() or "cpu"
+
+
+def normalize_embedding_device(requested: str) -> str:
+    """
+    将配置里的设备解析为 FlagEmbedding 可用的 `devices` 字符串。
+
+    Ray 的 AgentFlowWorker 等进程常 **看不到任何 GPU**（未分配 CUDA 或隔离了可见设备），
+    此时若仍传 `cuda:*` 会报「no CUDA GPUs are available」——自动回退 `cpu` 并打 warning。
+    """
+    dev = (requested or "cpu").strip() or "cpu"
+    if dev.lower() == "cpu":
+        return "cpu"
+    dl = dev.lower()
+    if dl.startswith("cuda"):
+        if not torch.cuda.is_available():
+            logger.warning(
+                "embedding device %r requested but torch.cuda.is_available() is False; "
+                "using cpu (typical for Ray agent workers without GPU allocation).",
+                dev,
+            )
+            return "cpu"
+        if ":" in dev:
+            try:
+                idx = int(dev.split(":")[-1])
+            except ValueError:
+                return dev
+            if idx < 0 or idx >= torch.cuda.device_count():
+                logger.warning(
+                    "embedding device %r invalid for torch.cuda.device_count()=%s; using cpu.",
+                    dev,
+                    torch.cuda.device_count(),
+                )
+                return "cpu"
+        return dev
+    return dev
 
 
 @dataclass
@@ -93,8 +128,10 @@ class HotpotQASearchToolLegacy:
         self.corpus_path = HOTPOTQA_CORPUS_JSONL
         self.embedding_model_name = embedding_model_name
         self.query_instruction = query_instruction
-        dev = (embedding_devices if embedding_devices is not None else default_hotpotqa_embedding_device()).strip() or "cpu"
-        self.embedding_devices = dev
+        raw = (embedding_devices if embedding_devices is not None else default_hotpotqa_embedding_device()).strip() or "cpu"
+        self.embedding_devices = normalize_embedding_device(raw)
+        if self.embedding_devices != raw:
+            logger.info("HotpotQASearchToolLegacy: effective embedding_devices=%r (from requested %r)", self.embedding_devices, raw)
 
         self._index: Optional[faiss.Index] = None
         self._corpus: list[str] = []

@@ -918,6 +918,9 @@ class AgentFlowManager:
                     scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                         node_id=node_id, soft=True
                     ),
+                    # AgentFlowWorker 不请求 GPU 配额，但仍需继承父进程的 CUDA 可见设备，
+                    # 以便检索用的 BGE 等模型可选用 GPU（如 HOTPOTQA_EMBEDDING_DEVICE=cuda:4）。
+                    runtime_env={"env_vars": {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"}},
                 ).remote(self.config, self.server_handles, self.reward_router_address)
             )
 

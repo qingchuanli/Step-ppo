@@ -52,10 +52,11 @@ def main() -> None:
     print(f"hpqa_corpus.jsonl    = {HOTPOTQA_CORPUS_JSONL.exists()}  ({HOTPOTQA_CORPUS_JSONL})")
     print(f"query                = {args.query!r}")
     print(f"embedding_model      = {args.embedding_model}")
-    print(f"HOTPOTQA_EMBEDDING_DEVICE (effective) = {default_hotpotqa_embedding_device()}")
+    print(f"HOTPOTQA_EMBEDDING_DEVICE (env) = {default_hotpotqa_embedding_device()}")
     print("---")
 
     tool = HotpotQASearchToolLegacy(embedding_model_name=args.embedding_model)
+    print(f"HotpotQASearchToolLegacy.embedding_devices (after normalize) = {tool.embedding_devices}")
     out = tool.execute({"query": args.query})
     print(f"success = {out.get('success')}")
     content = out.get("content", "")
