@@ -20,6 +20,23 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 LOG_DIR = "/root/data/log"
 LOG_PATH = f"{LOG_DIR}/hotpotqa_agent_flow.log"
 
+# Qwen / vLLM 等栈里 function name 可能与 recipe 里 OpenAI schema 的 "search" 不一致（例如 wiki_search）
+_RETRIEVAL_TOOL_NAMES = frozenset({"search", "wiki_search"})
+
+
+def _decode_tool_arguments(arguments: str) -> dict[str, Any] | None:
+    """Hermes 里 arguments 应为 JSON object；少数模型会再套一层 JSON 字符串。"""
+    try:
+        obj: Any = json.loads(arguments)
+    except Exception:
+        return None
+    if isinstance(obj, str):
+        try:
+            obj = json.loads(obj)
+        except Exception:
+            return None
+    return obj if isinstance(obj, dict) else None
+
 
 def _ensure_file_logger():
     os.makedirs(LOG_DIR, exist_ok=True)
@@ -104,6 +121,11 @@ class HotpotQAAgentFlow(AgentFlowBase):
         self.passage_pool = PassagePool()
         self.history_actions = []
 
+        # force_first_search 此前未生效：模型若不按 Hermes 输出 <tool_call>，passage_pool 会一直为空。
+        # 在首轮生成前用问题做一次检索，保证 prompt 里「Retrieved Passages」有内容（与 yaml 语义一致）。
+        if self.force_first_search:
+            await self._bootstrap_passages_from_question()
+
         try:
             while num_steps < self.max_steps:
                 num_steps += 1
@@ -174,17 +196,16 @@ class HotpotQAAgentFlow(AgentFlowBase):
 
                 queries: list[str] = []
                 for tool_call in tool_calls:
-                    try:
-                        tool_args = json.loads(tool_call.arguments)
-                    except Exception as e:
-                        logger.warning("Failed to parse tool arguments: %s", e)
+                    if tool_call.name not in _RETRIEVAL_TOOL_NAMES:
                         continue
-
-                    if tool_call.name == "search":
-                        query = tool_args.get("query")
-                        if not query:
-                            continue
-                        queries.append(query)
+                    tool_args = _decode_tool_arguments(tool_call.arguments)
+                    if not tool_args:
+                        logger.warning("Failed to parse tool arguments for %s", tool_call.name)
+                        continue
+                    query = tool_args.get("query")
+                    if not query:
+                        continue
+                    queries.append(str(query))
 
                 new_passages_list: list[list[Any]] = [[] for _ in queries]
                 if queries:
@@ -233,3 +254,26 @@ class HotpotQAAgentFlow(AgentFlowBase):
         finally:
             pass
         return AgentFlowOutput(steps=self.steps, metrics=metrics)
+
+    async def _bootstrap_passages_from_question(self) -> None:
+        if not (self.question or "").strip():
+            return
+        try:
+            tool_results = await asyncio.get_running_loop().run_in_executor(
+                None,
+                self.search_tool.batch_execute,
+                [{"query": self.question}],
+            )
+            added = 0
+            for item in tool_results:
+                if not item.get("success", False):
+                    continue
+                for p in parse_legacy_tool_result(str(item.get("content", ""))):
+                    before = len(self.passage_pool.passages)
+                    self.passage_pool.add_passage(p)
+                    if len(self.passage_pool.passages) > before:
+                        added += 1
+            if added:
+                self.history_actions.append(("search", self.question))
+        except Exception as e:
+            logger.warning("[hotpotqa_agent] bootstrap search failed: %s", e)

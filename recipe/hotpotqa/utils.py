@@ -1,3 +1,4 @@
+import logging
 import os
 import time
 from dataclasses import dataclass, field
@@ -17,6 +18,8 @@ HOTPOTQA_INDEX_BIN = HOTPOTQA_DATA_ROOT / "index.bin"
 HOTPOTQA_CORPUS_JSONL = HOTPOTQA_DATA_ROOT / "hpqa_corpus.jsonl"
 # hpqa_corpus.npy 仅 process_hotpotqa 建库时使用，运行时不需要加载
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class Passage:
@@ -34,8 +37,13 @@ class PassagePool:
         return any(p.pid == pid for p in self.passages)
 
     def add_passage(self, passage: Passage) -> None:
-        if not self.has_passage(passage.pid):
-            self.passages.append(passage)
+        # 按正文去重；pid 用池内序号（避免多次 search 时 parse 侧 pid 恒为 0~4 导致后续检索全被丢弃）
+        if any(p.text == passage.text for p in self.passages):
+            return
+        pid = len(self.passages)
+        self.passages.append(
+            Passage(pid=pid, title=passage.title, text=passage.text, score=passage.score)
+        )
 
     @property
     def passage_list(self) -> str:
@@ -126,6 +134,15 @@ class HotpotQASearchToolLegacy:
                 self.__class__._shared_corpus = corpus
                 self.__class__._shared_model = model
 
+                if int(index.ntotal) != len(corpus):
+                    logger.warning(
+                        "FAISS index.ntotal (%s) != hpqa_corpus.jsonl rows (%s). "
+                        "Ids from search may be out of range and passages will be empty; "
+                        "rebuild index.bin with the same jsonl or fix the corpus file.",
+                        int(index.ntotal),
+                        len(corpus),
+                    )
+
             self._index = self.__class__._shared_index
             self._corpus = self.__class__._shared_corpus or []
             self._model = self.__class__._shared_model
@@ -170,12 +187,24 @@ class HotpotQASearchToolLegacy:
             assert self._model is not None
             return self._model.encode_queries(queries).astype(np.float32)
 
-    def _format_results(self, results: list[int]) -> str:
+    def _format_results(self, results) -> str:
         results_list: list[str] = []
-        for result in results:
+        row_ids = [int(x) for x in np.asarray(results, dtype=np.int64).reshape(-1)]
+        for result in row_ids:
             if result < 0 or result >= len(self._corpus):
                 continue
             results_list.append(self._corpus[result])
+        if (
+            not results_list
+            and self._corpus
+            and row_ids
+            and max(row_ids) >= len(self._corpus)
+        ):
+            logger.warning(
+                "FAISS returned ids %s but corpus length is %s; dropping all hits.",
+                row_ids[:10],
+                len(self._corpus),
+            )
         return json.dumps({"results": results_list}, ensure_ascii=False)
 
 
