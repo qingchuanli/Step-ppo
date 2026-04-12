@@ -1,22 +1,20 @@
 """
 HotpotQA prompt & tool schema.
 
-Tool call format is handled entirely by the chat template (via `tools=` parameter
-in apply_chat_template). The user prompt must NOT contain any <tool_call> tags or
-JSON format examples — they conflict with the template-generated instructions and
-cause the model to output malformed JSON.
+Rollout uses `apply_chat_template(..., tools=HOTPOTQA_TOOL_SCHEMAS)` **and** an explicit
+user-side output contract, matching `recipe/paper_search/prompts.py`: the chat template
+injects schemas, but models still need concrete `<tool_call>` + JSON shape guidance to
+produce strings that `HermesToolParser` / env can parse.
 
-Key rule (learned from Agent-R1-legacy):
-  - Agent-R1-legacy: apply_chat_template(messages, tools=self.tools) generates tool
-    format in system area; user prompt contains ONLY the question and task instruction.
-  - Paper_search: same pattern, user prompt mentions tool calls generically but
-    Qwen3-4B handles the dual instructions fine; Qwen2.5-3B does NOT.
-  - Therefore: for Qwen2.5, user prompt must have ZERO *example* <tool_call> blocks (only dynamic feedback below).
+The JSON inside each `<tool_call>...</tool_call>` must be parseable as:
+  {"name": "search", "arguments": {"query": "<string>"}}
+with double-quoted keys and string values (no single quotes, no trailing commas).
 """
 
 HOTPOTQA_SYSTEM_PROMPT = (
     "You are a multi-hop QA research agent. "
-    "You can call the search tool to retrieve Wikipedia passages, then reason and answer."
+    "You retrieve Wikipedia evidence with the `search` tool using the required assistant format below, "
+    "then answer concisely when you have enough support."
 )
 
 HOTPOTQA_USER_PROMPT = """### Question
@@ -32,11 +30,24 @@ HOTPOTQA_USER_PROMPT = """### Question
 {tool_feedback}
 
 ### Instructions
-Analyze the retrieved passages and history actions, then decide your next step.
-- You may call the `search` tool to retrieve relevant Wikipedia passages.
-- You may call `search` multiple times to gather evidence from different angles.
-- Attend to the history actions and avoid repeating the same queries.
-- When you have gathered enough evidence, provide the final answer inside <answer> </answer> tags. The answer should be short and precise, with no explanation.
+Read the passages and history. Decide whether you need **new** retrieval or can answer from current evidence.
+- If you need more evidence, call `search` (do not repeat identical queries from history).
+- If evidence is sufficient, answer without calling `search`.
+
+### Output format (required for rollout)
+Put brief reasoning inside `<analysis>...</analysis>` if helpful, then either tool calls or the final answer.
+
+**To call search** — emit one or more blocks exactly like this (only double quotes inside JSON; `name` must be `search`):
+
+<tool_call>
+{{"name": "search", "arguments": {{"query": "your concise English search query"}}}}
+</tool_call>
+
+You may emit **multiple** `<tool_call>...</tool_call>` blocks in one turn for parallel searches.
+
+**To finish** — when no further search is needed, output only:
+
+<answer>short exact answer, no explanation</answer>
 """
 
 SEARCH_TOOL_SCHEMA = {

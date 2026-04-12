@@ -5,8 +5,8 @@ Architecture follows recipe/paper_search style:
 - Each step re-builds messages from current state (not multi-turn message accumulation)
 - Passages and action history are maintained as structured state, rendered into prompt each step
 - Prompt length is bounded: passages are truncated to fit within budget
-- Tool call format is handled by chat template (via tools= in apply_chat_template),
-  NOT by manual format instructions in the user prompt
+- Tool call format: `tools=` in apply_chat_template **plus** explicit user-side
+  `<tool_call>` JSON contract in `recipe.hotpotqa.prompts` (same idea as paper_search).
 - Search tool backed by local FAISS + BGE (HotpotQASearchToolLegacy)
 - Reward: tool steps get reward_score=0.0; final step gets reward_score=None (→ custom EM reward)
 """
