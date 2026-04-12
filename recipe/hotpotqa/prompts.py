@@ -1,64 +1,61 @@
 """
-HotpotQA prompt & tool schema.
-
-Rollout uses `apply_chat_template(..., tools=HOTPOTQA_TOOL_SCHEMAS)` **and** an explicit
-user-side output contract, matching `recipe/paper_search/prompts.py`: the chat template
-injects schemas, but models still need concrete `<tool_call>` + JSON shape guidance to
-produce strings that `HermesToolParser` / env can parse.
-
-The JSON inside each `<tool_call>...</tool_call>` must be parseable as:
-  {"name": "search", "arguments": {"query": "<string>"}}
-with double-quoted keys and string values (no single quotes, no trailing commas).
+HotpotQA prompts — same layout as `recipe/paper_search/prompts.py` (system + user
+sections, Instructions, Output Format with `<analysis>` / `<tool_call>` placeholders).
+HotpotQA-only: `### Retrieved Passages`, `### Recent tool / format issues`, and
+`<answer>` when finishing from current evidence.
 """
 
-HOTPOTQA_SYSTEM_PROMPT = (
-    "You are a multi-hop QA research agent. "
-    "You retrieve Wikipedia evidence with the `search` tool using the required assistant format below, "
-    "then answer concisely when you have enough support."
-)
+HOTPOTQA_SYSTEM_PROMPT = "You are a research agent. Your goal is to answer the User Query using Wikipedia search evidence."
 
-HOTPOTQA_USER_PROMPT = """### Question
+HOTPOTQA_USER_PROMPT = """### User Query 
 {user_query}
-
-### Retrieved Passages
-{passage_list}
 
 ### History Actions
 {history_actions}
+
+### Retrieved Passages
+{passage_list}
 
 ### Recent tool / format issues
 {tool_feedback}
 
 ### Instructions
-Read the passages and history. Decide whether you need **new** retrieval or can answer from current evidence.
-- If you need more evidence, call `search` (do not repeat identical queries from history).
-- If evidence is sufficient, answer without calling `search`.
+Analyze the **Retrieved Passages** and **History Actions** to determine the next set of actions. Enclose your analysis of the state and decision logic within `<analysis>...</analysis>` tags.
+**You support parallel tool calling.** You should output multiple tool calls in a single step if several independent actions are valuable at the current state.
+**Attend to the history actions and avoid repeating the same search queries.**
+When you can answer the question from the current passages, put the short final answer inside `<answer></answer>` tags (no explanation) instead of further tool calls.
 
-### Output format (required for rollout)
-Put brief reasoning inside `<analysis>...</analysis>` if helpful, then either tool calls or the final answer.
-
-**To call search** — emit one or more blocks exactly like this (only double quotes inside JSON; `name` must be `search`):
-
+### Output Format
+<analysis>
+[Your analysis of the current state and decision logic...]
+</analysis>
 <tool_call>
-{{"name": "search", "arguments": {{"query": "your concise English search query"}}}}
+[Tool call 1]
 </tool_call>
-
-You may emit **multiple** `<tool_call>...</tool_call>` blocks in one turn for parallel searches.
-
-**To finish** — when no further search is needed, output only:
-
-<answer>short exact answer, no explanation</answer>
+<tool_call>
+[Tool call 2]
+</tool_call>
+...
 """
 
 SEARCH_TOOL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "search",
-        "description": "Search for information on the internet using Wikipedia as a knowledge source.",
+        "description": (
+            "Search Wikipedia for passages relevant to the user question. "
+            "Use natural-language or keyword queries; must differ from prior history queries when possible."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Search query"}
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "A single search query (natural language or keywords). "
+                        "Must differ from all history queries when seeking new evidence."
+                    ),
+                }
             },
             "required": ["query"],
         },

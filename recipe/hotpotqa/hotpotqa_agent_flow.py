@@ -5,8 +5,9 @@ Architecture follows recipe/paper_search style:
 - Each step re-builds messages from current state (not multi-turn message accumulation)
 - Passages and action history are maintained as structured state, rendered into prompt each step
 - Prompt length is bounded: passages are truncated to fit within budget
-- Tool call format: `tools=` in apply_chat_template **plus** explicit user-side
-  `<tool_call>` JSON contract in `recipe.hotpotqa.prompts` (same idea as paper_search).
+- Tool / answer format: `tools=` in apply_chat_template **plus** user prompt aligned with
+  `recipe/paper_search/prompts.py` (`<analysis>`, `<tool_call>`, final `<answer>`); see
+  `recipe.hotpotqa.prompts.HOTPOTQA_USER_PROMPT`.
 - Search tool backed by local FAISS + BGE (HotpotQASearchToolLegacy)
 - Reward: tool steps get reward_score=0.0; final step gets reward_score=None (→ custom EM reward)
 """
@@ -189,7 +190,11 @@ class HotpotQAAgentFlow(AgentFlowBase):
         *,
         max_passage_chars: int | None = None,
     ) -> list[dict]:
-        """Build [system, user] messages from current state, with passage truncation for safety."""
+        """Build [system, user] messages from current state, with passage truncation for safety.
+
+        Must stay in sync with `HOTPOTQA_USER_PROMPT.format(...)` keys:
+        user_query, history_actions, passage_list, tool_feedback.
+        """
         if max_passage_chars is None:
             max_passage_chars = self.prompt_length * 3
         fb = tool_feedback.strip() if tool_feedback.strip() else "None"
