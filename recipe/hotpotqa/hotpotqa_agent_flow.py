@@ -182,7 +182,11 @@ class HotpotQAAgentFlow(AgentFlowBase):
                     extra_fields=self._make_extra_fields(history_actions),
                 )
                 step = await self._postprocess(step, **kwargs)
-                step.extra_fields.setdefault("reward_extra_info", {})["num_tool_steps"] = len(history_actions)
+                ri = step.extra_fields.get("reward_extra_info", {})
+                step.extra_fields["reward_extra_info"] = {
+                    "num_tool_steps": len(history_actions),
+                    "acc": ri.get("acc", 0.0),
+                }
                 steps.append(step)
                 break
 
