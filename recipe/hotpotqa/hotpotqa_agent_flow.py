@@ -74,15 +74,9 @@ class HotpotQAAgentFlow(AgentFlowBase):
         self.response_length = self.config.actor_rollout_ref.rollout.response_length
         self.tool_schemas = HOTPOTQA_TOOL_SCHEMAS
 
-        # Legacy-compatible local FAISS search tool.
-        data_dir = kwargs.get("data_dir", None)
-        logger.warning(
-            "[hotpotqa_agent] init retriever with data_dir=%s",
-            data_dir,
-        )
+        # Legacy-compatible local FAISS search tool（路径写死在 recipe/hotpotqa/utils.py）
         embedding_model_name = kwargs.get("embedding_model_name", "BAAI/bge-large-en-v1.5")
         self.search_tool = HotpotQASearchToolLegacy(
-            data_dir=data_dir,
             embedding_model_name=embedding_model_name,
             max_retries=self.faiss_max_retries,
             retry_backoff_s=self.faiss_retry_backoff_s,

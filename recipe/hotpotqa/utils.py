@@ -9,6 +9,13 @@ import faiss
 from FlagEmbedding import FlagAutoModel
 import numpy as np
 
+# 固定数据目录（与预处理产物一致；不通过 Hydra/yaml 配置）
+HOTPOTQA_DATA_ROOT = Path("/root/data")
+HOTPOTQA_INDEX_BIN = HOTPOTQA_DATA_ROOT / "index.bin"
+# 检索结果展示用段落文本；需与建索引时的 hpqa_corpus.jsonl 一致
+HOTPOTQA_CORPUS_JSONL = HOTPOTQA_DATA_ROOT / "hpqa_corpus.jsonl"
+# hpqa_corpus.npy 仅 process_hotpotqa 建库时使用，运行时不需要加载
+
 
 @dataclass
 class Passage:
@@ -57,16 +64,14 @@ class HotpotQASearchToolLegacy:
 
     def __init__(
         self,
-        data_dir: Optional[str] = None,
         embedding_model_name: str = "BAAI/bge-large-en-v1.5",
         query_instruction: str = "Represent this sentence for searching relevant passages: ",
         max_retries: int = 3,
         retry_backoff_s: float = 0.2,
     ) -> None:
-        default_data_dir = Path("/root/data")
-        self.data_dir = Path(data_dir) if data_dir else default_data_dir
-        self.index_path = self.data_dir / "index.bin"
-        self.corpus_path = self.data_dir / "hpqa_corpus.jsonl"
+        self.data_dir = HOTPOTQA_DATA_ROOT
+        self.index_path = HOTPOTQA_INDEX_BIN
+        self.corpus_path = HOTPOTQA_CORPUS_JSONL
         self.embedding_model_name = embedding_model_name
         self.query_instruction = query_instruction
         self.max_retries = max(1, int(max_retries))
@@ -85,7 +90,7 @@ class HotpotQASearchToolLegacy:
         self.close()
 
     def _ensure_loaded(self) -> None:
-        cache_key = str(self.data_dir.resolve())
+        cache_key = str(HOTPOTQA_DATA_ROOT)
         with self.__class__._shared_lock:
             if (
                 self.__class__._shared_key != cache_key

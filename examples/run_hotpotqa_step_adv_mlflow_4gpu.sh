@@ -12,7 +12,7 @@ EXP_NAME='step-level-adv-hotpotqa-4gpu'
 
 # Resolve repo root from script location (robust to running from other dirs)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+PROJECT_DIR="/root/workspace/Step-ppo"
 # HotpotQA FAISS CPU search config
 CONFIG_PATH="$PROJECT_DIR/recipe/hotpotqa/base_faiss_cpu.yaml"
 

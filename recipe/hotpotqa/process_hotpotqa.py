@@ -30,6 +30,18 @@ def main() -> None:
     parser.add_argument("--corpus_path", type=str, default="/root/data/hpqa_corpus.jsonl")
     parser.add_argument("--embedding_model", type=str, default="BAAI/bge-large-en-v1.5")
     parser.add_argument(
+        "--devices",
+        type=str,
+        default="",
+        help='Embedding devices. Examples: "cuda:0", "cuda:0,cuda:1", "cpu". Empty means library default.',
+    )
+    parser.add_argument("--batch_size", type=int, default=1024)
+    parser.add_argument(
+        "--reuse_embeddings",
+        action="store_true",
+        help="Reuse existing hpqa_corpus.npy if present and skip encode_corpus.",
+    )
+    parser.add_argument(
         "--query_instruction",
         type=str,
         default="Represent this sentence for searching relevant passages: ",
@@ -46,23 +58,35 @@ def main() -> None:
         raise SystemExit(f"Corpus not found: {corpus_path}")
 
     os.makedirs(str(data_dir), exist_ok=True)
-    corpus = _load_corpus_texts(corpus_path)
+    vectors: np.ndarray
 
-    model = FlagAutoModel.from_finetuned(
-        args.embedding_model,
-        query_instruction_for_retrieval=args.query_instruction,
-        devices="cpu",
-    )
-    vectors = model.encode_corpus(corpus)
-    vectors = np.asarray(vectors, dtype=np.float32)
-    np.save(str(emb_path), vectors)
+    if args.reuse_embeddings and emb_path.exists():
+        print(f"[hotpotqa] reuse existing embeddings: {emb_path}")
+        vectors = np.load(str(emb_path)).astype(np.float32)
+    else:
+        corpus = _load_corpus_texts(corpus_path)
+        model_kwargs = {
+            "query_instruction_for_retrieval": args.query_instruction,
+        }
+        if args.devices.strip():
+            devices = [x.strip() for x in args.devices.split(",") if x.strip()]
+            model_kwargs["devices"] = devices[0] if len(devices) == 1 else devices
+        print(
+            f"[hotpotqa] encoding corpus, n={len(corpus)}, batch_size={args.batch_size}, devices={args.devices or 'default'}"
+        )
+        model = FlagAutoModel.from_finetuned(args.embedding_model, **model_kwargs)
+        try:
+            vectors = model.encode_corpus(corpus, batch_size=int(args.batch_size))
+        except TypeError:
+            vectors = model.encode_corpus(corpus)
+        vectors = np.asarray(vectors, dtype=np.float32)
+        np.save(str(emb_path), vectors)
+        print(f"[hotpotqa] saved embeddings to {emb_path}")
 
-    corpus_numpy = np.load(str(emb_path)).astype(np.float32)
-    dim = corpus_numpy.shape[-1]
+    dim = vectors.shape[-1]
     index = faiss.index_factory(dim, "Flat", faiss.METRIC_INNER_PRODUCT)
-    index.add(corpus_numpy)
+    index.add(vectors)
     faiss.write_index(index, str(index_path))
-    print(f"[hotpotqa] saved embeddings to {emb_path}")
     print(f"[hotpotqa] saved index to {index_path}")
 
 if __name__ == "__main__":
