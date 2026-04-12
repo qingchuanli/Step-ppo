@@ -156,11 +156,10 @@ class HotpotQAAgentFlow(AgentFlowBase):
             messages = self._build_messages(question, passages, history_actions)
             prompt_ids = await self.apply_chat_template(messages, tools=self.tool_schemas)
 
-            max_total = self.prompt_length + self.response_length
-            if len(prompt_ids) >= max_total:
+            if len(prompt_ids) > self.prompt_length:
                 logger.warning(
-                    "[hotpotqa_agent][step=%d] prompt too long (%d tokens, budget %d); truncating.",
-                    num_steps, len(prompt_ids), max_total,
+                    "[hotpotqa_agent][step=%d] prompt too long (%d tokens, limit %d); truncating.",
+                    num_steps, len(prompt_ids), self.prompt_length,
                 )
                 prompt_ids = prompt_ids[-self.prompt_length:]
 
