@@ -186,9 +186,12 @@ class HotpotQAAgentFlow(AgentFlowBase):
         passages: list[tuple[str, str]],
         actions: list[str],
         tool_feedback: str,
+        *,
+        max_passage_chars: int | None = None,
     ) -> list[dict]:
         """Build [system, user] messages from current state, with passage truncation for safety."""
-        max_passage_chars = self.prompt_length * 3
+        if max_passage_chars is None:
+            max_passage_chars = self.prompt_length * 3
         fb = tool_feedback.strip() if tool_feedback.strip() else "None"
         user_content = HOTPOTQA_USER_PROMPT.format(
             user_query=question,
@@ -200,6 +203,45 @@ class HotpotQAAgentFlow(AgentFlowBase):
             {"role": "system", "content": HOTPOTQA_SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ]
+
+    async def _prompt_ids_within_budget(
+        self,
+        question: str,
+        passages: list[tuple[str, str]],
+        history_actions: list[str],
+        fb_text: str,
+        *,
+        num_step: int,
+    ) -> list[int]:
+        """
+        Tokenize prompt with tools= so the model always sees tool definitions (chat template prefix).
+
+        PaperSearchAgentFlow does not truncate the tokenized prompt. Here we only shrink the
+        variable-length passage block; we must NOT use tail slicing on prompt_ids — that drops
+        the tool schema and breaks <tool_call> JSON adherence.
+        """
+        max_chars = self.prompt_length * 3
+        min_chars = 400
+        last_ids: list[int] = []
+        while True:
+            messages = self._build_messages(
+                question, passages, history_actions, fb_text, max_passage_chars=max_chars
+            )
+            last_ids = await self.apply_chat_template(messages, tools=self.tool_schemas)
+            if len(last_ids) <= self.prompt_length:
+                return last_ids
+            if max_chars <= min_chars:
+                break
+            max_chars = max(min_chars, int(max_chars * 0.72))
+
+        logger.warning(
+            "[hotpotqa_agent][step=%d] prompt still too long (%d tokens, limit %d) after shrinking "
+            "passages; keeping PREFIX so tool definitions remain.",
+            num_step,
+            len(last_ids),
+            self.prompt_length,
+        )
+        return last_ids[: self.prompt_length]
 
     def _make_extra_fields(self, history_actions: list[str], acc: float = 0.0) -> dict[str, Any]:
         """Build extra_fields with consistent reward_extra_info keys across all steps."""
@@ -231,15 +273,9 @@ class HotpotQAAgentFlow(AgentFlowBase):
             fb_text = "\n".join(tool_feedback_lines[-3:]) if tool_feedback_lines else ""
             if not self.enable_tool_parse_feedback:
                 fb_text = ""
-            messages = self._build_messages(question, passages, history_actions, fb_text)
-            prompt_ids = await self.apply_chat_template(messages, tools=self.tool_schemas)
-
-            if len(prompt_ids) > self.prompt_length:
-                logger.warning(
-                    "[hotpotqa_agent][step=%d] prompt too long (%d tokens, limit %d); truncating.",
-                    num_steps, len(prompt_ids), self.prompt_length,
-                )
-                prompt_ids = prompt_ids[-self.prompt_length:]
+            prompt_ids = await self._prompt_ids_within_budget(
+                question, passages, history_actions, fb_text, num_step=num_steps
+            )
 
             with simple_timer("generate_sequences", metrics):
                 output = await self.server_manager.generate(
