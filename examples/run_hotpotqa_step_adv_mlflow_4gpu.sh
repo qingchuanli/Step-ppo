@@ -2,10 +2,10 @@ set -x
 
 export SWANLAB_API_KEY=d4Ejv4vUuBe9Jy3NOZrhE
 export SWANLAB_MODE=cloud
-# 训练用卡；若 BGE 要放在「多出来的一张卡」上，需把该卡也列入可见设备，并设 HOTPOTQA_EMBEDDING_DEVICE 为对应逻辑 cuda 号
-# 例：物理 1–5 都可见时，最后一张常为 cuda:4 → export CUDA_VISIBLE_DEVICES=1,2,3,4,5 且 export HOTPOTQA_EMBEDDING_DEVICE=cuda:4
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1,2,3,4}
-export HOTPOTQA_EMBEDDING_DEVICE=${HOTPOTQA_EMBEDDING_DEVICE:-cpu}
+# 默认：物理 GPU 1–4 给 PPO/vLLM（trainer.n_gpus_per_node=4 → 进程内 cuda:0–3），物理 GPU 5 给 BGE 检索（cuda:4）。
+# 若只有 4 张卡，启动前请 export CUDA_VISIBLE_DEVICES=1,2,3,4 且 export HOTPOTQA_EMBEDDING_DEVICE=cpu
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1,2,3,4,5}
+export HOTPOTQA_EMBEDDING_DEVICE=${HOTPOTQA_EMBEDDING_DEVICE:-cuda:4}
 export VLLM_USE_V1=1
 export HYDRA_FULL_ERROR=1
 export MLFLOW_TRACKING_URI=${MLFLOW_TRACKING_URI:-http://172.17.0.1:5000}
@@ -27,6 +27,7 @@ VAL_PATH="$PROJECT_DIR/data/corpus/hotpotqa/validation.parquet"
 PROJECT_NAME='HotpotQA_ARFT'
 EXP_NAME='hotpotqa_step_level_adv_mlflow_4gpu'
 
+# 磁盘：actor / critic 各自最多保留最近 3 次保存（verl 轮转逻辑见 RayPPOTrainer._save_checkpoint）
 python3 -m arft.main_agent_ppo \
     algorithm.adv_estimator=gae \
     data.train_files="$TRAIN_PATH" \
@@ -70,4 +71,6 @@ python3 -m arft.main_agent_ppo \
     trainer.val_before_train=True \
     trainer.save_freq=50 \
     trainer.test_freq=50 \
+    trainer.max_actor_ckpt_to_keep=3 \
+    trainer.max_critic_ckpt_to_keep=3 \
     trainer.total_epochs=5 "$@"
