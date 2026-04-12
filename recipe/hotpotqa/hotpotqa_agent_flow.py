@@ -9,8 +9,12 @@ from transformers import AutoProcessor, AutoTokenizer
 
 from arft.agent_flow.agent_flow import AgentFlowBase, AgentFlowOutput, AgentFlowStep, register
 from arft.reward_loop import ARFTRewardLoopWorker as RewardLoopWorker
-from recipe.hotpotqa.prompts import HOTPOTQA_SYSTEM_PROMPT, HOTPOTQA_TOOL_SCHEMAS, HOTPOTQA_USER_PROMPT
-from recipe.hotpotqa.utils import HotpotQASearchToolLegacy, PassagePool, format_history_actions, parse_legacy_tool_result
+from recipe.hotpotqa.prompts import (
+    HOTPOTQA_SYSTEM_PROMPT,
+    HOTPOTQA_TOOL_SCHEMAS,
+    format_hotpotqa_initial_user,
+)
+from recipe.hotpotqa.utils import HotpotQASearchToolLegacy, PassagePool, parse_legacy_tool_result
 from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager, DictConfigWrap
 from verl.experimental.agent_loop.tool_parser import ToolParser
 from verl.utils.profiler import simple_timer
@@ -56,13 +60,12 @@ def _ensure_file_logger():
 @register("hotpotqa_agent")
 class HotpotQAAgentFlow(AgentFlowBase):
     """
-    Multi-step HotpotQA agent:
+    Multi-step HotpotQA agent（多轮对话式上下文）:
 
-    - Tools: search (local FAISS CPU index)
-    - Reward:
-      * All tool steps: reward_score = 0.0 (no shaping)
-      * Final step (no tool calls): reward_score = None,
-        so ARFT RewardLoop will call custom_reward_function (exact match EM).
+    - Prompt 由 system + 累积 user/assistant 构成；每轮保留 assistant 解码原文；
+      检索后以 user 轮注入工具 JSON 与可读段落（不再用单块 action 历史拼盘）。
+    - Tools: search / wiki_search（本地 FAISS）
+    - Reward: 工具步 reward_score = 0.0；最终无 tool call 时 reward_score = None → custom_reward_function（EM）。
     """
 
     def __init__(
@@ -93,17 +96,78 @@ class HotpotQAAgentFlow(AgentFlowBase):
 
         # Legacy-compatible local FAISS search tool（路径写死在 recipe/hotpotqa/utils.py）
         embedding_model_name = kwargs.get("embedding_model_name", "BAAI/bge-large-en-v1.5")
+        embedding_devices = kwargs.get("embedding_devices", None)
         self.search_tool = HotpotQASearchToolLegacy(
             embedding_model_name=embedding_model_name,
             max_retries=self.faiss_max_retries,
             retry_backoff_s=self.faiss_retry_backoff_s,
+            embedding_devices=embedding_devices,
         )
 
         self.passage_pool = PassagePool()
-        self.history_actions: list[tuple[str, str]] = []
+        self._dialog_messages: list[dict[str, str]] = []
+        self._num_search_rounds: int = 0
         self.question: str = ""
         self.ground_truth: str = ""
         self.steps: list[AgentFlowStep] = []
+
+    @staticmethod
+    def _format_passages_readable(tool_content: str) -> str:
+        passages = parse_legacy_tool_result(tool_content)
+        if not passages:
+            return "(No passages in payload or JSON parse failed.)"
+        lines: list[str] = []
+        for i, p in enumerate(passages, start=1):
+            snippet = p.text[:1200].replace("\n", " ")
+            lines.append(f"  [{i}] {snippet}")
+        return "\n".join(lines)
+
+    def _format_search_observation_message(
+        self,
+        queries: list[str],
+        tool_results: list[dict[str, Any]],
+        *,
+        footer: bool = True,
+    ) -> str:
+        """将检索结果格式化为 user 轮内容（含工具原始 JSON + 可读段落）。"""
+        if not queries:
+            body = (
+                "No executable `search` / `wiki_search` call was parsed from your last assistant message "
+                "(check tool name and JSON). Use:\n\n"
+                '<tool_call>\n{"name":"search","arguments":{"query":"YOUR QUERY"}}\n</tool_call>'
+            )
+            return body + (
+                "\n\nPlease continue: call `search` if needed, or answer in <answer>...</answer>."
+                if footer
+                else ""
+            )
+
+        parts: list[str] = [
+            "### Search tool output",
+            "Below is what the local search tool returned for your last tool call(s).",
+            "",
+        ]
+        for q, item in zip(queries, tool_results, strict=True):
+            parts.append(f"**Query:** {q}")
+            parts.append("")
+            if not item.get("success", False):
+                parts.append(f"(Search failed) {item.get('content', '')}")
+            else:
+                raw = str(item.get("content", ""))
+                parts.append("**Raw JSON (tool `content`):**")
+                parts.append(raw)
+                parts.append("")
+                parts.append("**Passages (readable):**")
+                parts.append(self._format_passages_readable(raw))
+            parts.append("")
+            parts.append("---")
+            parts.append("")
+        if footer:
+            parts.append(
+                "Please continue: call `search` again if you need more evidence, "
+                "or output the final answer in <answer>...</answer> when ready."
+            )
+        return "\n".join(parts).rstrip() + "\n"
 
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentFlowOutput:
         raw_prompt = list(kwargs["raw_prompt"])
@@ -119,28 +183,25 @@ class HotpotQAAgentFlow(AgentFlowBase):
         num_steps = 0
         self.steps = []
         self.passage_pool = PassagePool()
-        self.history_actions = []
+        self._dialog_messages = []
+        self._num_search_rounds = 0
 
-        # force_first_search 此前未生效：模型若不按 Hermes 输出 <tool_call>，passage_pool 会一直为空。
-        # 在首轮生成前用问题做一次检索，保证 prompt 里「Retrieved Passages」有内容（与 yaml 语义一致）。
+        bootstrap_block = ""
         if self.force_first_search:
-            await self._bootstrap_passages_from_question()
+            bootstrap_block = await self._bootstrap_passages_from_question()
+
+        self._dialog_messages = [
+            {
+                "role": "user",
+                "content": format_hotpotqa_initial_user(self.question, bootstrap_block),
+            }
+        ]
 
         try:
             while num_steps < self.max_steps:
                 num_steps += 1
 
-                messages = [
-                    {"role": "system", "content": HOTPOTQA_SYSTEM_PROMPT},
-                    {
-                        "role": "user",
-                        "content": HOTPOTQA_USER_PROMPT.format(
-                            user_query=self.question,
-                            passage_list=self.passage_pool.passage_list,
-                            history_actions=format_history_actions(self.history_actions),
-                        ),
-                    },
-                ]
+                messages = [{"role": "system", "content": HOTPOTQA_SYSTEM_PROMPT}, *self._dialog_messages]
 
                 prompt_ids = await self.apply_chat_template(
                     messages,
@@ -183,7 +244,7 @@ class HotpotQAAgentFlow(AgentFlowBase):
                         reward_score=None,
                         extra_fields={
                             "reward_extra_info": {
-                                "num_tool_steps": len(self.history_actions),
+                                "num_tool_steps": self._num_search_rounds,
                             },
                         },
                     )
@@ -208,6 +269,7 @@ class HotpotQAAgentFlow(AgentFlowBase):
                     queries.append(str(query))
 
                 new_passages_list: list[list[Any]] = [[] for _ in queries]
+                tool_results: list[dict[str, Any]] = []
                 if queries:
                     with simple_timer("tool_calls", metrics):
                         try:
@@ -230,12 +292,18 @@ class HotpotQAAgentFlow(AgentFlowBase):
                                 e,
                             )
                             new_passages_list = [[] for _ in queries]
+                            tool_results = [{"content": str(e), "success": False} for _ in queries]
 
-                # Update passage pool & history
+                # 多轮对话：保留本轮 assistant 原文，再把检索结果作为下一轮 user 内容写入历史
+                self._dialog_messages.append({"role": "assistant", "content": response_text})
+                obs = self._format_search_observation_message(queries, tool_results, footer=True)
+                self._dialog_messages.append({"role": "user", "content": obs})
+
                 for query, passages in zip(queries, new_passages_list, strict=False):
-                    self.history_actions.append(("search", query))
                     for p in passages:
                         self.passage_pool.add_passage(p)
+                if queries:
+                    self._num_search_rounds += len(queries)
 
                 # Tool step: reward_score=0.0 (no shaping), but we still push step into trajectory.
                 step = AgentFlowStep(
@@ -245,7 +313,7 @@ class HotpotQAAgentFlow(AgentFlowBase):
                     reward_score=0.0,
                     extra_fields={
                         "reward_extra_info": {
-                            "num_tool_steps": len(self.history_actions),
+                            "num_tool_steps": self._num_search_rounds,
                         },
                     },
                 )
@@ -255,9 +323,10 @@ class HotpotQAAgentFlow(AgentFlowBase):
             pass
         return AgentFlowOutput(steps=self.steps, metrics=metrics)
 
-    async def _bootstrap_passages_from_question(self) -> None:
+    async def _bootstrap_passages_from_question(self) -> str:
+        """执行首轮隐式检索，填充 passage_pool，并返回写入首轮 user 的检索文本（无结果则空串）。"""
         if not (self.question or "").strip():
-            return
+            return ""
         try:
             tool_results = await asyncio.get_running_loop().run_in_executor(
                 None,
@@ -273,7 +342,14 @@ class HotpotQAAgentFlow(AgentFlowBase):
                     self.passage_pool.add_passage(p)
                     if len(self.passage_pool.passages) > before:
                         added += 1
-            if added:
-                self.history_actions.append(("search", self.question))
+            if not added:
+                return ""
+            self._num_search_rounds += 1
+            return self._format_search_observation_message(
+                [self.question],
+                tool_results,
+                footer=False,
+            )
         except Exception as e:
             logger.warning("[hotpotqa_agent] bootstrap search failed: %s", e)
+            return ""

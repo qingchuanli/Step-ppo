@@ -8,7 +8,8 @@ Run from repo root (与训练时相同的 Python 环境):
   python recipe/hotpotqa/test_search_tool.py "Who founded Apple?"
 
 可选环境变量（与 recipe/hotpotqa/utils.py 一致）：
-  HOTPOTQA_DATA_ROOT  默认 /root/data
+  HOTPOTQA_DATA_ROOT        默认 /root/data
+  HOTPOTQA_EMBEDDING_DEVICE 默认 cpu；BGE 编码用，如 cuda:4
 """
 from __future__ import annotations
 
@@ -26,6 +27,7 @@ from recipe.hotpotqa.utils import (  # noqa: E402
     HOTPOTQA_DATA_ROOT,
     HOTPOTQA_INDEX_BIN,
     HotpotQASearchToolLegacy,
+    default_hotpotqa_embedding_device,
 )
 
 
@@ -50,6 +52,7 @@ def main() -> None:
     print(f"hpqa_corpus.jsonl    = {HOTPOTQA_CORPUS_JSONL.exists()}  ({HOTPOTQA_CORPUS_JSONL})")
     print(f"query                = {args.query!r}")
     print(f"embedding_model      = {args.embedding_model}")
+    print(f"HOTPOTQA_EMBEDDING_DEVICE (effective) = {default_hotpotqa_embedding_device()}")
     print("---")
 
     tool = HotpotQASearchToolLegacy(embedding_model_name=args.embedding_model)

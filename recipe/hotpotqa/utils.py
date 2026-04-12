@@ -21,6 +21,11 @@ HOTPOTQA_CORPUS_JSONL = HOTPOTQA_DATA_ROOT / "hpqa_corpus.jsonl"
 logger = logging.getLogger(__name__)
 
 
+def default_hotpotqa_embedding_device() -> str:
+    """BGE query 编码设备；为当前进程可见 GPU 的 PyTorch 逻辑序号（如 cuda:4），不是 nvidia-smi 物理编号。"""
+    return os.environ.get("HOTPOTQA_EMBEDDING_DEVICE", "cpu").strip() or "cpu"
+
+
 @dataclass
 class Passage:
     pid: int
@@ -77,12 +82,15 @@ class HotpotQASearchToolLegacy:
         query_instruction: str = "Represent this sentence for searching relevant passages: ",
         max_retries: int = 3,
         retry_backoff_s: float = 0.2,
+        embedding_devices: Optional[str] = None,
     ) -> None:
         self.data_dir = HOTPOTQA_DATA_ROOT
         self.index_path = HOTPOTQA_INDEX_BIN
         self.corpus_path = HOTPOTQA_CORPUS_JSONL
         self.embedding_model_name = embedding_model_name
         self.query_instruction = query_instruction
+        dev = (embedding_devices if embedding_devices is not None else default_hotpotqa_embedding_device()).strip() or "cpu"
+        self.embedding_devices = dev
         self.max_retries = max(1, int(max_retries))
         self.retry_backoff_s = max(0.0, float(retry_backoff_s))
 
@@ -99,7 +107,7 @@ class HotpotQASearchToolLegacy:
         self.close()
 
     def _ensure_loaded(self) -> None:
-        cache_key = str(HOTPOTQA_DATA_ROOT)
+        cache_key = f"{HOTPOTQA_DATA_ROOT}|{self.embedding_devices}|{self.embedding_model_name}"
         with self.__class__._shared_lock:
             if (
                 self.__class__._shared_key != cache_key
@@ -124,10 +132,15 @@ class HotpotQASearchToolLegacy:
                         text = str(rec.get("text", ""))
                         corpus.append(f"{title} {text}".strip())
 
+                logger.info(
+                    "HotpotQASearchToolLegacy: loading FlagEmbedding model=%s devices=%s",
+                    self.embedding_model_name,
+                    self.embedding_devices,
+                )
                 model = FlagAutoModel.from_finetuned(
                     self.embedding_model_name,
                     query_instruction_for_retrieval=self.query_instruction,
-                    devices="cpu",
+                    devices=self.embedding_devices,
                 )
                 self.__class__._shared_key = cache_key
                 self.__class__._shared_index = index
