@@ -5,10 +5,8 @@ Architecture follows recipe/paper_search style:
 - Each step re-builds messages from current state (not multi-turn message accumulation)
 - Passages and action history are maintained as structured state, rendered into prompt each step
 - Prompt length is bounded: passages are truncated to fit within budget
-
-Design aligned with Agent-R1-legacy:
-- Tool format: <tool_call>{"name":"search","arguments":{"query":"..."}}</tool_call>
-- Model reasoning in <think>...</think>, final answer in <answer>...</answer>
+- Tool call format is handled by chat template (via tools= in apply_chat_template),
+  NOT by manual format instructions in the user prompt
 - Search tool backed by local FAISS + BGE (HotpotQASearchToolLegacy)
 - Reward: tool steps get reward_score=0.0; final step gets reward_score=None (→ custom EM reward)
 """
@@ -27,7 +25,6 @@ from recipe.hotpotqa.prompts import (
     HOTPOTQA_SYSTEM_PROMPT,
     HOTPOTQA_TOOL_SCHEMAS,
     HOTPOTQA_USER_PROMPT,
-    INSTRUCTION_FOLLOWING,
 )
 from recipe.hotpotqa.utils import HotpotQASearchToolLegacy, parse_legacy_tool_result
 from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager, DictConfigWrap
@@ -125,7 +122,6 @@ class HotpotQAAgentFlow(AgentFlowBase):
             user_query=question,
             passage_list=_format_passage_list(passages, max_chars=max_passage_chars),
             history_actions=_format_history_actions(actions),
-            instruction_following=INSTRUCTION_FOLLOWING,
         )
         return [
             {"role": "system", "content": HOTPOTQA_SYSTEM_PROMPT},

@@ -1,23 +1,17 @@
 """
 HotpotQA prompt & tool schema.
 
-Design aligned with Agent-R1-legacy's approach:
-- User prompt includes: question + instruction + accumulated passages + action history
-- Model output format: <think>...</think> then <tool_call>...</tool_call> or <answer>...</answer>
-- Each step re-builds the full prompt from current state (not multi-turn message accumulation),
-  keeping prompt length bounded and predictable.
+Tool call format is handled entirely by the chat template (via `tools=` parameter
+in apply_chat_template). The user prompt should NOT include explicit <tool_call> JSON
+format — doing so conflicts with the template-generated instructions and causes the
+model to output malformed JSON.
+
+This follows the same pattern as recipe/paper_search.
 """
 
 HOTPOTQA_SYSTEM_PROMPT = (
     "You are a multi-hop QA research agent. "
     "You can call the search tool to retrieve Wikipedia passages, then reason and answer."
-)
-
-INSTRUCTION_FOLLOWING = (
-    "You FIRST think about the reasoning process as an internal monologue "
-    "and then provide the final answer. "
-    "The reasoning process MUST BE enclosed within <think> </think> tags. "
-    "The final answer MUST BE put in <answer> </answer> tags."
 )
 
 HOTPOTQA_USER_PROMPT = """### Question
@@ -30,22 +24,22 @@ HOTPOTQA_USER_PROMPT = """### Question
 {history_actions}
 
 ### Instructions
-{instruction_following}
-- You can call the `search` tool with a natural language query to retrieve relevant passages.
-- You may call `search` multiple times to gather evidence from different angles.
-- When calling search, output in the following format:
+Analyze the retrieved passages and history actions, then decide your next step.
+You FIRST think about the reasoning process as an internal monologue and then take action.
+- You may call the `search` tool one or more times to retrieve relevant Wikipedia passages.
+- Attend to the history actions and avoid repeating the same queries.
+- When you have gathered enough evidence, provide the final answer inside <answer> </answer> tags.
 
+### Output Format
 <tool_call>
-{{"name":"search","arguments":{{"query":"YOUR SEARCH QUERY"}}}}
+[search tool call]
 </tool_call>
 
-- When you have enough evidence, provide the final answer:
+OR when ready to answer:
 
 <answer>
-YOUR FINAL ANSWER HERE
+[Your final answer here — short and precise, no explanation]
 </answer>
-
-Do NOT explain the reasoning in the final answer, only provide the answer text inside the <answer> tags.
 """
 
 SEARCH_TOOL_SCHEMA = {
