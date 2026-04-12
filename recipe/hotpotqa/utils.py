@@ -1,3 +1,4 @@
+import os
 import time
 from dataclasses import dataclass, field
 import json
@@ -9,8 +10,8 @@ import faiss
 from FlagEmbedding import FlagAutoModel
 import numpy as np
 
-# 固定数据目录（与预处理产物一致；不通过 Hydra/yaml 配置）
-HOTPOTQA_DATA_ROOT = Path("/root/data")
+# 数据目录：默认 /root/data；Docker 或本地可通过环境变量 HOTPOTQA_DATA_ROOT 覆盖（需与建索引时一致）
+HOTPOTQA_DATA_ROOT = Path(os.environ.get("HOTPOTQA_DATA_ROOT", "/root/data")).expanduser().resolve()
 HOTPOTQA_INDEX_BIN = HOTPOTQA_DATA_ROOT / "index.bin"
 # 检索结果展示用段落文本；需与建索引时的 hpqa_corpus.jsonl 一致
 HOTPOTQA_CORPUS_JSONL = HOTPOTQA_DATA_ROOT / "hpqa_corpus.jsonl"
