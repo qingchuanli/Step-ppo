@@ -97,6 +97,26 @@ def need_critic_agent_ppo(config) -> bool:
     return verl_need_critic(config)
 
 
+def _critic_vf_loss_response_mask(response_mask: torch.Tensor, adv_key: str) -> torch.Tensor:
+    """
+    ``response_mask`` to pass into ``dp_critic.update_critic`` (VF loss uses this as ``loss_mask``).
+
+    - ``token_gae``: clone of full mask — train V on every LLM token (aligns with
+      ``arft.core_algos.compute_token_gae_advantage_return``).
+    - ``gae`` (and any other adv): only ``[:, 0]`` — step-level scalar V per agent step (aligns with
+      ``arft.core_algos.compute_gae_advantage_return`` using ``values[:, 0]``).
+
+    Repo audit (``zeros_like(response_mask)`` + ``[:, 0] = 1`` for critic): **only this helper**
+    implements that shrink for ARFT agent PPO. ``_compute_values`` / ``dp_critic.compute_values`` still
+    use the batch's real ``response_mask``; no second site needs changing for ``token_gae``.
+    """
+    if adv_key == "token_gae":
+        return response_mask.clone()
+    value_mask = torch.zeros_like(response_mask)
+    value_mask[:, 0] = 1
+    return value_mask
+
+
 def compute_advantage(
     data: DataProto,
     adv_estimator: AdvantageEstimator | str,
@@ -853,14 +873,11 @@ class RayAgentTrainer(RayPPOTrainer):
                     # update critic
                     if self.use_critic:
                         with marked_timer("update_critic", timing_raw, color="pink"):
-                            # Temporarily replace response_mask for critic
                             response_mask = batch.batch["response_mask"]
-                            # For "sequence = action", the critic value used by GAE is at action start.
-                            # In `dp_critic.py`, returned `values` are sliced as `values[:, -resp_len-1:-1]`,
-                            # so index 0 corresponds to the prompt-last position (before response[0]).
-                            value_mask = torch.zeros_like(response_mask)
-                            value_mask[:, 0] = 1
-                            batch.batch["response_mask"] = value_mask
+                            adv_key = _agent_adv_estimator_key(self.config.algorithm.adv_estimator)
+                            batch.batch["response_mask"] = _critic_vf_loss_response_mask(
+                                response_mask, adv_key
+                            )
 
                             # update critic
                             critic_output = self._update_critic(batch)
