@@ -87,7 +87,9 @@ def need_critic(config: DictConfig) -> bool:
     """Given a config, do we need critic."""
     if config.critic.enable is not None:
         return bool(config.critic.enable)
-    elif config.algorithm.adv_estimator in (AdvantageEstimator.GAE, AdvantageEstimator.TOKEN_GAE):
+    adv = config.algorithm.adv_estimator
+    adv_s = adv.value if isinstance(adv, AdvantageEstimator) else str(adv)
+    if adv_s in ("gae", "token_gae"):
         return True
     else:
         warnings.warn(

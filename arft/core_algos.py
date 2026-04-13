@@ -15,11 +15,12 @@
 """
 Core functions to implement PPO algorithms.
 
-Agent PPO (`arft.main_agent_ppo` / `RayAgentTrainer`) selects advantage code via
-`algorithm.adv_estimator` in `arft.ray_agent_trainer.compute_advantage`:
-  - ``gae`` → `compute_gae_advantage_return` (step-level GAE over agent steps)
-  - ``token_gae`` → `compute_token_gae_advantage_return` (token-level GAE)
-  - ``grpo`` → `compute_grpo_outcome_advantage`
+Agent PPO (`arft.main_agent_ppo` / `RayAgentTrainer`) maps ``algorithm.adv_estimator`` **by string**
+in ``arft.ray_agent_trainer.compute_advantage`` to this module (not verl's default PPO GAE):
+
+  - ``"gae"`` → ``compute_gae_advantage_return``
+  - ``"token_gae"`` → ``compute_token_gae_advantage_return``
+  - ``"grpo"`` → ``compute_grpo_outcome_advantage``
 """
 
 from collections import defaultdict

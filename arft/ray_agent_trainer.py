@@ -80,9 +80,16 @@ def get_valid_data(data: DataProto) -> tuple[DataProto, torch.Tensor]:
     return valid_data, valid_mask
 
 
+def _agent_adv_estimator_key(adv_estimator: AdvantageEstimator | str) -> str:
+    """Normalize Hydra / enum to `algorithm.adv_estimator` string for ARFT routing."""
+    if isinstance(adv_estimator, AdvantageEstimator):
+        return adv_estimator.value
+    return str(adv_estimator)
+
+
 def compute_advantage(
     data: DataProto,
-    adv_estimator: AdvantageEstimator,
+    adv_estimator: AdvantageEstimator | str,
     gamma: float = 1.0,
     lam: float = 1.0,
     num_repeat: int = 1,
@@ -94,12 +101,13 @@ def compute_advantage(
     # 通过 non_tensor_batch["step_indices"] 来区分同一条轨迹内的不同 step 的顺序。
     """Compute advantage estimates for policy optimization.
 
-    This function computes advantage estimates using various estimators like GAE, GRPO, REINFORCE++, etc.
-    The advantage estimates are used to guide policy optimization in RL algorithms.
+    Uses **only** ``arft.core_algos``: ``gae`` → ``compute_gae_advantage_return``,
+    ``token_gae`` → ``compute_token_gae_advantage_return``, ``grpo`` → ``compute_grpo_outcome_advantage``.
+    Dispatch is by string key from ``_agent_adv_estimator_key`` (Hydra often passes plain ``str``).
 
     Args:
         data (DataProto): The data containing batched model outputs and inputs.
-        adv_estimator (AdvantageEstimator): The advantage estimator to use (e.g., GAE, GRPO, REINFORCE++).
+        adv_estimator: ``AdvantageEstimator`` member or equivalent string (e.g. ``"token_gae"``).
         gamma (float, optional): Discount factor for future rewards. Defaults to 1.0.
         lam (float, optional): Lambda parameter for GAE. Defaults to 1.0.
         num_repeat (int, optional): Number of times to repeat the computation. Defaults to 1.
@@ -118,9 +126,9 @@ def compute_advantage(
 
     valid_data, valid_mask = get_valid_data(data)
 
-    # prepare response group
-    if adv_estimator == AdvantageEstimator.GAE:
-        # Step-level GAE over agent steps (one scalar V + step reward per trajectory step); see `arft.core_algos`.
+    adv_key = _agent_adv_estimator_key(adv_estimator)
+
+    if adv_key == "gae":
         from arft.core_algos import compute_gae_advantage_return
 
         valid_advantages, valid_returns = compute_gae_advantage_return(
@@ -134,8 +142,7 @@ def compute_advantage(
         )
         advantages[valid_mask] = valid_advantages
         returns[valid_mask] = valid_returns
-    elif adv_estimator == AdvantageEstimator.TOKEN_GAE:
-        # Token-level GAE within each step + bootstrap across steps; see `arft.core_algos`.
+    elif adv_key == "token_gae":
         from arft.core_algos import compute_token_gae_advantage_return
 
         valid_advantages, valid_returns = compute_token_gae_advantage_return(
@@ -149,8 +156,7 @@ def compute_advantage(
         )
         advantages[valid_mask] = valid_advantages
         returns[valid_mask] = valid_returns
-    elif adv_estimator == AdvantageEstimator.GRPO:
-        # Call compute_grpo_outcome_advantage with parameters matching its definition
+    elif adv_key == "grpo":
         from arft.core_algos import compute_grpo_outcome_advantage
 
         valid_advantages, valid_returns = compute_grpo_outcome_advantage(
@@ -162,6 +168,11 @@ def compute_advantage(
         )
         advantages[valid_mask] = valid_advantages
         returns[valid_mask] = valid_returns
+    else:
+        raise ValueError(
+            f"RayAgentTrainer.compute_advantage: unsupported adv_estimator={adv_estimator!r} (key={adv_key!r}). "
+            "Supported: 'gae', 'token_gae', 'grpo' → arft.core_algos.*"
+        )
 
     data.batch["advantages"] = advantages
     data.batch["returns"] = returns

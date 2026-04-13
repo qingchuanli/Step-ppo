@@ -95,8 +95,10 @@ class AdvantageEstimator(str, Enum):
     """
 
     GAE = "gae"
-    # Agent-flow / multi-step: token-wise GAE across LLM action tokens (see `arft.core_algos.compute_token_gae_advantage_return`)
+    # Agent-flow / multi-step: token-wise GAE (see `arft.core_algos.compute_token_gae_advantage_return`).
+    # Duplicate value makes `token_gae` an alias of `TOKEN_GAE` so getattr(AdvantageEstimator, "token_gae") works.
     TOKEN_GAE = "token_gae"
+    token_gae = "token_gae"
     GRPO = "grpo"
     REINFORCE_PLUS_PLUS = "reinforce_plus_plus"
     REINFORCE_PLUS_PLUS_BASELINE = "reinforce_plus_plus_baseline"
