@@ -120,10 +120,25 @@ def compute_advantage(
 
     # prepare response group
     if adv_estimator == AdvantageEstimator.GAE:
-        # Compute advantages and returns using Generalized Advantage Estimation (GAE)
+        # Step-level GAE over agent steps (one scalar V + step reward per trajectory step); see `arft.core_algos`.
         from arft.core_algos import compute_gae_advantage_return
 
         valid_advantages, valid_returns = compute_gae_advantage_return(
+            token_level_rewards=valid_data.batch["token_level_rewards"],
+            values=valid_data.batch["values"],
+            response_mask=valid_data.batch["response_mask"],
+            trajectory_uids=valid_data.non_tensor_batch["trajectory_uids"],
+            step_indices=valid_data.non_tensor_batch["step_indices"],
+            gamma=gamma,
+            lam=lam,
+        )
+        advantages[valid_mask] = valid_advantages
+        returns[valid_mask] = valid_returns
+    elif adv_estimator == AdvantageEstimator.TOKEN_GAE:
+        # Token-level GAE within each step + bootstrap across steps; see `arft.core_algos`.
+        from arft.core_algos import compute_token_gae_advantage_return
+
+        valid_advantages, valid_returns = compute_token_gae_advantage_return(
             token_level_rewards=valid_data.batch["token_level_rewards"],
             values=valid_data.batch["values"],
             response_mask=valid_data.batch["response_mask"],

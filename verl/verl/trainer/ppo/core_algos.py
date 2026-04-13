@@ -95,6 +95,8 @@ class AdvantageEstimator(str, Enum):
     """
 
     GAE = "gae"
+    # Agent-flow / multi-step: token-wise GAE across LLM action tokens (see `arft.core_algos.compute_token_gae_advantage_return`)
+    TOKEN_GAE = "token_gae"
     GRPO = "grpo"
     REINFORCE_PLUS_PLUS = "reinforce_plus_plus"
     REINFORCE_PLUS_PLUS_BASELINE = "reinforce_plus_plus_baseline"

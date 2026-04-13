@@ -14,8 +14,12 @@
 # limitations under the License.
 """
 Core functions to implement PPO algorithms.
-The function implemented in this file should be used by trainer with different distributed strategies to
-implement PPO-like algorithms.
+
+Agent PPO (`arft.main_agent_ppo` / `RayAgentTrainer`) selects advantage code via
+`algorithm.adv_estimator` in `arft.ray_agent_trainer.compute_advantage`:
+  - ``gae`` → `compute_gae_advantage_return` (step-level GAE over agent steps)
+  - ``token_gae`` → `compute_token_gae_advantage_return` (token-level GAE)
+  - ``grpo`` → `compute_grpo_outcome_advantage`
 """
 
 from collections import defaultdict
