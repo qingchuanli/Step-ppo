@@ -24,10 +24,10 @@ from hydra.core.plugins import Plugins
 from hydra.plugins.search_path_plugin import SearchPathPlugin
 from omegaconf import OmegaConf
 
-from arft.ray_agent_trainer import RayAgentTrainer
+from arft.ray_agent_trainer import RayAgentTrainer, need_critic_agent_ppo
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.trainer.ppo.reward import load_reward_manager
-from verl.trainer.ppo.utils import need_critic, need_reference_policy
+from verl.trainer.ppo.utils import need_reference_policy
 from verl.utils.config import validate_config
 from verl.utils.device import auto_set_device, is_cuda_available
 
@@ -315,7 +315,7 @@ class TaskRunner:
         validate_config(
             config=config,
             use_reference_policy=need_reference_policy(self.role_worker_mapping),
-            use_critic=need_critic(config),
+            use_critic=need_critic_agent_ppo(config),
         )
 
         # Download the checkpoint from HDFS to the local machine.

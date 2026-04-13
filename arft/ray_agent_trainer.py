@@ -87,6 +87,16 @@ def _agent_adv_estimator_key(adv_estimator: AdvantageEstimator | str) -> str:
     return str(adv_estimator)
 
 
+def need_critic_agent_ppo(config) -> bool:
+    """Whether RayAgentTrainer must load a critic (value net). Used by `validate_config` and mirrors `__init__` logic."""
+    from verl.trainer.ppo.utils import need_critic as verl_need_critic
+
+    adv_key = _agent_adv_estimator_key(config.algorithm.adv_estimator)
+    if adv_key in ("gae", "token_gae"):
+        return True
+    return verl_need_critic(config)
+
+
 def compute_advantage(
     data: DataProto,
     adv_estimator: AdvantageEstimator | str,
@@ -191,6 +201,22 @@ class RayAgentTrainer(RayPPOTrainer):
         super().__init__(*args, **kwargs)
         self.use_reward_loop = True
         self._reward_scaler = None
+
+        # `need_critic` in upstream verl only treats `gae` as needing a critic; `token_gae` must too
+        # (both call `arft.core_algos.*` which require `batch["values"]`). If `use_critic` stays False,
+        # `init_workers` skips the critic group and advantage computation hits KeyError: 'values'.
+        adv_key = _agent_adv_estimator_key(self.config.algorithm.adv_estimator)
+        if adv_key in ("gae", "token_gae"):
+            if self.config.critic.enable is False:
+                raise ValueError(
+                    f"algorithm.adv_estimator={adv_key!r} requires a value network, but critic.enable=False. "
+                    "Remove critic.enable=False or switch adv_estimator (e.g. grpo)."
+                )
+            if Role.Critic not in self.role_worker_mapping:
+                raise ValueError(
+                    f"algorithm.adv_estimator={adv_key!r} requires Role.Critic in role_worker_mapping."
+                )
+            self.use_critic = True
 
     def _dump_generations(self, inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path):
         # TODO: 以轨迹为单位，将轨迹内的所有 step 的数据都 dump 出来。
