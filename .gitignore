@@ -2,3 +2,4 @@
 /mlflow.db
 /stat/
 /.venv/
+/outputs/

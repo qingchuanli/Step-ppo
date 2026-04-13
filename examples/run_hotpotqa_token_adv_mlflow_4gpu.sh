@@ -27,7 +27,7 @@ TRAIN_PATH="$PROJECT_DIR/data/corpus/hotpotqa/train.parquet"
 VAL_PATH="$PROJECT_DIR/data/corpus/hotpotqa/validation.parquet"
 
 PROJECT_NAME='HotpotQA_ARFT'
-EXP_NAME='hotpotqa_token_level_adv_mlflow_4gpu'
+EXP_NAME='hotpotqa_token_level_0.95_adv_mlflow_4gpu'
 
 python3 -m arft.main_agent_ppo \
     algorithm.adv_estimator=token_gae \
