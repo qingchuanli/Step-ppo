@@ -68,6 +68,7 @@ python3 -m arft.main_agent_ppo \
     critic.model.fsdp_config.param_offload=True \
     critic.model.fsdp_config.optimizer_offload=True \
     algorithm.use_kl_in_reward=False \
+    algorithm.gamma=0.95 \
     reward_model.enable=False \
     custom_reward_function.path=recipe/hotpotqa/reward_fn.py \
     custom_reward_function.name=compute_score \

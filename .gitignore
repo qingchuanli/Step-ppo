@@ -1,2 +1,4 @@
 /checkpoints/
 /mlflow.db
+/stat/
+/.venv/
