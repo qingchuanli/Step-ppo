@@ -27,7 +27,7 @@ TRAIN_PATH="$PROJECT_DIR/data/corpus/hotpotqa/train.parquet"
 VAL_PATH="$PROJECT_DIR/data/corpus/hotpotqa/validation.parquet"
 
 PROJECT_NAME='HotpotQA_ARFT'
-EXP_NAME='hotpotqa_step_level_0.95_adv_mlflow_4gpu'
+EXP_NAME='hotpotqa_step_level_0.99_adv_mlflow_4gpu'
 
 python3 -m arft.main_agent_ppo \
     algorithm.adv_estimator=gae \
@@ -68,7 +68,7 @@ python3 -m arft.main_agent_ppo \
     critic.model.fsdp_config.param_offload=True \
     critic.model.fsdp_config.optimizer_offload=True \
     algorithm.use_kl_in_reward=False \
-    algorithm.gamma=0.95 \
+    algorithm.gamma=0.99 \
     reward_model.enable=False \
     custom_reward_function.path=recipe/hotpotqa/reward_fn.py \
     custom_reward_function.name=compute_score \
@@ -79,7 +79,7 @@ python3 -m arft.main_agent_ppo \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.val_before_train=True \
-    trainer.save_freq=50 \
+    trainer.save_freq=100 \
     trainer.test_freq=50 \
     trainer.max_actor_ckpt_to_keep=3 \
     trainer.max_critic_ckpt_to_keep=3 \
